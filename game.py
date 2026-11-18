@@ -86,7 +86,7 @@ TOOLS: list[dict] = [
     _tool("chi", "吃出顺子，给出你手里要用的两张，写成 一张+一张（如 s4+s6）",
           {"combo": {"type": "string"}}, ["combo"]),
     _tool("win", "宣布胡牌", {}, []),
-    _tool("bloom", "后开花：手里有杠、牌墙最后一张能把牌型补成胡时，直接取那张胡牌（不用报听）", {}, []),
+    _tool("bloom", "后开花：轮到你摸牌时不摸了，直接胡牌墙最后一张（手里得有杠，不用报听）", {}, []),
     _tool("pass", "过，不要这张牌", {}, []),
     _tool("ting", "报听。手牌已经听牌、想锁死手牌等胡，就调它", {}, []),
     NOTE_TOOL,
@@ -203,8 +203,6 @@ class Game:
             return self._decision(self.turn, "draw", opts)
         if self.phase == "discard":
             legal = self.r.legal_actions(self._view(self.turn), self.turn)
-            if self._can_bloom(self.turn):
-                legal = legal + [Action("bloom")]
             return self._decision(self.turn, "discard", legal)
         if self.phase == "react":
             if not self.reactors:
@@ -238,6 +236,9 @@ class Game:
 
         if d.kind == "draw" and action.kind in ("draw", "bloom"):
             if action.kind == "bloom":
+                res = self.r.validate(self._view(seat), seat, action)
+                if not res.ok:
+                    raise RuntimeError(f"动作不合法：{res.code} {res.detail}")
                 self._do_bloom(seat)
                 return self.drain_events()
             self._do_draw(seat, kan=(self.phase == "kan_draw"))
@@ -299,14 +300,10 @@ class Game:
             self._do_kan(seat, action)
             return self.drain_events()
 
-        if action.kind == "bloom":
-            self._do_bloom(seat)
-            return self.drain_events()
-
         raise RuntimeError(f"自己回合不接受 {action.kind}")
 
     def _can_bloom(self, seat: int) -> bool:
-        """后开花：手里有杠，牌墙最后那张能把牌型补成胡。"""
+        """后开花：该摸牌的时候不摸，直接胡牌墙最后那张（手里得有杠）。"""
         if not self.r.cfg.allow_bloom or not self.wall:
             return False
         if not any(m.kind == "kan" for m in self.fixed[seat]):
@@ -695,6 +692,19 @@ def _selftest() -> int:
     ev = g.apply(Action("bloom"))
     case("后开花就是胡", (g.result["type"], g.result["seat"], g.result["bloom"]), ("win", 0, True))
     case("取走的是牌墙最后一张", (ev[0].tile, len(g.wall)), (p9, 5))
+
+    g = Game(GameConfig(seed=16))
+    g.start()
+    for s in range(4):
+        g.hands[s] = [0] * KINDS
+        g.fixed[s] = []
+        g.discards[s] = []
+    g.fixed[0] = [Meld("kan", (p4, p4, p4, p4))]
+    g.hands[0] = _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼")
+    g.wall = deque([parse_tile("1万")] * 5 + [p9])
+    g.turn, g.phase, g.last, g.drawn = 0, "draw", None, None
+    g.apply(Action("draw"))
+    case("先摸了牌就不能后开花", [a.kind for a in g.pending().legal].count("bloom"), 0)
 
     g = Game(GameConfig(seed=15))
     g.start()
