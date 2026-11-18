@@ -329,6 +329,8 @@ class LLMPlayer:
         wall_s = f"牌墙还剩 {view['wall_left']} 张"
         if view.get("wall_last"):
             wall_s += f"，最后一张（明牌）是 {view['wall_last']}"
+        if (view.get("dead") or {}).get(view["seat"]):
+            wall_s += "\n（你本局放过胡，已经不准再胡了）"
         return (
             f"你手里的 {len(view['hand'])} 张：{hand}\n"
             f"你已成的面子：{fixed_s}\n"

@@ -55,6 +55,7 @@ def snapshot(game: Game, meta: dict | None = None) -> dict:
             "rob": None if game.rob is None else [game.rob[0], tile_id(game.rob[1]), game.rob_kind],
             "result": game.result,
             "ting": {str(s): bool(v) for s, v in game.ting.items()},
+            "dead": {str(s): bool(v) for s, v in game.dead_win.items()},
             "drawn": None if game.drawn is None else tile_id(game.drawn),
         },
         "meta": meta or {},
@@ -82,6 +83,8 @@ def restore(data: dict) -> tuple[Game, dict]:
     game.result = gs.get("result")
     ting = gs.get("ting") or {}
     game.ting = {s: bool(ting.get(str(s), False)) for s in range(game.cfg.seats)}
+    dead = gs.get("dead") or {}
+    game.dead_win = {s: bool(dead.get(str(s), False)) for s in range(game.cfg.seats)}
     drawn = gs.get("drawn")
     game.drawn = None if drawn is None else parse_tile(drawn)
     return game, (data.get("meta") or {})

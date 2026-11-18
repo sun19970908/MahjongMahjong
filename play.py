@@ -113,6 +113,8 @@ def screen(game: Game, me: int, buddy: int, status: str, log: list[str],
         head = f" {who}  {hand_n} 张"
         if v.get("ting", {}).get(s):
             head += paint(" ●报听", MINE)
+        if v.get("dead", {}).get(s):
+            head += paint(" ✕已弃胡", DIM)
         if fixed:
             head += "   面子 " + "  ".join(mini(m) for m in fixed)
         elif s != me:
@@ -191,6 +193,8 @@ def apply_and_note(game: Game, act: Action, log: list[str], me: int) -> None:
             log.append(f"{SEAT[e.seat]} 报听" + (f"（等 {waits}）" if waits else ""))
         elif t == "bloom":
             log.append(f"{SEAT[e.seat]} 后开花 {name}")
+        elif t == "dead":
+            log.append(f"{SEAT[e.seat]} 放过胡，本局不准再胡")
         elif t == "win":
             tag = "抢杠" if (e.data or {}).get("rob") else ("后开花" if (e.data or {}).get("bloom") else "")
             log.append(f"*** {SEAT[e.seat]} {tag}胡了！")

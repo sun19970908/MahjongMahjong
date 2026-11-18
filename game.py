@@ -44,6 +44,7 @@ from referee import (
 # 反应优先级：胡 > 杠 > 碰 > 吃
 PRIORITY = {"win": 4, "kan": 3, "pon": 2, "chi": 1}
 CLAIMS = ("win", "kan", "pon", "chi")
+WIN_KINDS = ("win", "bloom")        # 能把牌胡掉的那两种动作
 
 
 def _tool(name: str, desc: str, props: dict, required: list[str]) -> dict:
@@ -176,6 +177,7 @@ class Game:
         self.rob_kind: str | None = None                               # 哪种杠被抢：in_hand / added
         self.result: dict | None = None
         self.ting: dict[int, bool] = {s: False for s in range(config.seats)}   # 谁报听了
+        self.dead_win: dict[int, bool] = {s: False for s in range(config.seats)}  # 谁放过胡了：本局不准再胡
         self.drawn: int | None = None                                        # 刚摸进来的那张
 
     # ---------- 开局 ----------
@@ -231,6 +233,11 @@ class Game:
         if seat is not None and seat != d.seat:
             raise RuntimeError(f"现在轮 {d.seat} 号，不是 {seat} 号")
         seat = d.seat
+
+        # 能胡的时候不胡（打牌、碰、吃、杠、摸牌、过），这一局就不准再胡了
+        if action.kind not in WIN_KINDS and any(a.kind in WIN_KINDS for a in d.legal):
+            self.dead_win[seat] = True
+            self._emit(Event("dead", seat, data={"by": d.kind}))
 
         if d.kind == "draw" and action.kind in ("draw", "bloom"):
             if action.kind == "bloom":
@@ -302,13 +309,9 @@ class Game:
 
     def _can_bloom(self, seat: int) -> bool:
         """后开花：该摸牌的时候不摸，直接胡牌墙最后那张（手里得有杠）。"""
-        if not self.r.cfg.allow_bloom or not self.wall:
+        if self.dead_win[seat]:
             return False
-        if not any(m.kind == "kan" for m in self.fixed[seat]):
-            return False
-        c = list(self.hands[seat])
-        c[self.wall[-1]] += 1
-        return self.r.is_win(tuple(c), tuple(self.fixed[seat])).ok
+        return self.r.validate(self._view(seat), seat, Action("bloom")).ok
 
     def _do_bloom(self, seat: int) -> None:
         tile = self.wall.pop()               # 取的是牌墙最后一张（明牌）
@@ -453,7 +456,7 @@ class Game:
         for s in range(self.cfg.seats):
             if s == owner:
                 continue
-            if not self.ting[s]:
+            if not self.ting[s] or self.dead_win[s]:
                 continue
             v = HandView(seat=s, seats=self.cfg.seats, hands={s: tuple(self.hands[s])},
                          fixed={s: tuple(self.fixed[s])}, last=(owner, "discard", tile))
@@ -524,8 +527,9 @@ class Game:
             "wall_left": len(self.wall),
             "wall_last": tile_id(self.wall[-1]) if self.wall else None,   # 最后一张是明牌，谁都能看
             "last": None if self.last is None else {"seat": self.last[0], "tile": tile_id(self.last[2])},
-            "can_win": self.r.is_win(tuple(self.hands[seat]), tuple(self.fixed[seat])).ok if self.phase == "discard" and self.turn == seat else False,
+            "can_win": (not self.dead_win[seat]) and self.r.is_win(tuple(self.hands[seat]), tuple(self.fixed[seat])).ok if self.phase == "discard" and self.turn == seat else False,
             "ting": {s: self.ting[s] for s in range(self.cfg.seats)},
+            "dead": {s: self.dead_win[s] for s in range(self.cfg.seats)},
             "drawn": tile_id(self.drawn) if self.drawn is not None and seat == self.turn else None,
             "pending": None if d is None else {"seat": d.seat, "kind": d.kind},
             "result": self.result,
@@ -548,6 +552,7 @@ class Game:
             wall_last=self.wall[-1] if self.wall else None,
             last=self.last if last is None else last,
             ting=dict(self.ting),
+            dead=dict(self.dead_win),
             drawn=self.drawn if (self.drawn is not None and seat == self.turn) else None,
         )
 
@@ -843,6 +848,65 @@ def _selftest() -> int:
         g.apply(Action("pass"))
     case("没人抢才轮到杠的人补张", g.phase, "kan_draw")
     case("没人抢，尾张能胡才给开花", [a.kind for a in g.pending().legal], ["draw", "bloom"])
+
+    # 6e 放过胡就锁死本局：能胡的时候 pass，这局不准再胡
+    def pass_setup() -> Game:
+        """1 号报听等 7 饼，0 号打出 7 饼，1 号面前有 win / pass。"""
+        g = Game(GameConfig(seed=21))
+        g.start()
+        for s in range(4):
+            g.hands[s] = [0] * KINDS
+            g.fixed[s] = []
+            g.discards[s] = []
+        g.hands[0] = _h("7饼 3万 4万 5万 1条 2条 3条 5饼 6饼 1饼 4饼 1饼 9条")
+        g.hands[1] = _h("1万 2万 3万 4万 5万 6万 1条 2条 3条 9饼 9饼 7饼 7饼")
+        g.ting[1] = True
+        g.wall.extend([parse_tile("1万")] * 20)
+        g.turn, g.phase, g.last, g.drawn = 0, "discard", None, None
+        g.apply(Action("discard", tile=p7))
+        return g
+
+    g = pass_setup()
+    case("听牌的人面前有胡和过", (g.pending().seat, [a.kind for a in g.pending().legal]), (1, ["win", "pass"]))
+    g.apply(Action("pass"))
+    case("放过胡就锁死", g.dead_win[1], True)
+    g.hands[1][p7] += 1
+    g.turn, g.phase, g.last = 1, "discard", None
+    case("锁死之后自摸也不给胡", [a.kind for a in g.pending().legal if a.kind == "win"], [])
+    case("硬报胡被裁判拦", g.r.validate(g._view(1), 1, Action("win")).code, "WIN_DEAD")
+
+    g = pass_setup()
+    g.apply(next(a for a in g.pending().legal if a.kind == "win"))
+    case("胡了就不算弃胡", g.dead_win[1], False)
+
+    # 自己摸进来的牌就能胡，却打回去：也算弃胡
+    g = Game(GameConfig(seed=22))
+    g.start()
+    for s in range(4):
+        g.hands[s] = [0] * KINDS
+        g.fixed[s] = []
+        g.discards[s] = []
+    g.hands[1] = _h("1万 2万 3万 4万 5万 6万 1条 2条 3条 9饼 9饼 7饼 7饼 7饼")
+    g.ting[1] = True
+    g.wall.extend([parse_tile("1万")] * 20)
+    g.turn, g.phase, g.last, g.drawn = 1, "discard", None, p7
+    case("自摸能胡也有胡的选项", any(a.kind == "win" for a in g.pending().legal), True)
+    g.apply(Action("discard", tile=p7))
+    case("自摸不胡也锁死", g.dead_win[1], True)
+
+    # 锁死的人不能后开花
+    g = Game(GameConfig(seed=14))
+    g.start()
+    for s in range(4):
+        g.hands[s] = [0] * KINDS
+        g.fixed[s] = []
+        g.discards[s] = []
+    g.fixed[0] = [Meld("kan", (p4, p4, p4, p4))]
+    g.hands[0] = _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼")
+    g.wall = deque([parse_tile("1万")] * 5 + [p9])
+    g.dead_win[0] = True
+    g.turn, g.phase, g.last, g.drawn = 0, "kan_draw", None, None
+    case("弃胡的人不给后开花", [a.kind for a in g.pending().legal], ["draw"])
 
     # 5 荒庄：牌墙摸空
     g = Game(GameConfig(seats=3, seed=3))

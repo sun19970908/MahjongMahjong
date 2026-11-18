@@ -340,6 +340,7 @@ class HandView:
     wall_last: int | None = None                 # 牌墙最后一张（明牌）
     last: tuple[int, str, int] | None = None   # (出牌者, 'discard', 牌)
     ting: dict[int, bool] = field(default_factory=dict)   # 谁已经报听了
+    dead: dict[int, bool] = field(default_factory=dict)   # 谁放过胡了：本局不准再胡
     drawn: int | None = None                    # 自己回合刚摸进来的那张
 
 
@@ -458,8 +459,9 @@ class Referee:
 
         own_turn = view.last is None or view.last[0] == seat
         ting = bool(view.ting.get(seat))
+        dead = bool(view.dead.get(seat))
         if own_turn:
-            if self.is_win(counts, fixed).ok and (not self.cfg.require_ting or ting):
+            if not dead and self.is_win(counts, fixed).ok and (not self.cfg.require_ting or ting):
                 out.append(Action("win"))
             if ting:
                 # 报听之后手牌锁死：只能把刚摸进来的那张打回去（杠例外）
@@ -480,7 +482,7 @@ class Referee:
         src, kind, tile = view.last
         if kind == "discard":
             c = list(counts); c[tile] += 1
-            if self.is_win(tuple(c), fixed).ok and (not self.cfg.require_ting or ting):
+            if not dead and self.is_win(tuple(c), fixed).ok and (not self.cfg.require_ting or ting):
                 out.append(Action("win", tile=tile, meta={"from": src}))
             if not ting:
                 if self.cfg.allow_pon and counts[tile] >= 2:
@@ -512,6 +514,8 @@ class Referee:
             # 后开花：手里有杠，这手只等牌墙最后那一张，就取它胡。要单听，但不要求报听
             if not self.cfg.allow_bloom:
                 return Result(False, "NO_BLOOM", "这局没有后开花")
+            if view.dead.get(seat):
+                return Result(False, "WIN_DEAD", "你本局放过胡，不能再胡")
             if view.wall_last is None:
                 return Result(False, "WALL_EMPTY", "牌墙没牌了")
             if not any(m.kind == "kan" for m in fixed):
@@ -523,6 +527,8 @@ class Referee:
                 return Result(False, "BLOOM_NOT_WAIT", f"这手等的不是{tile_name(view.wall_last)}")
             return Result(True, "OK")
         if action.kind == "win":
+            if view.dead.get(seat):
+                return Result(False, "WIN_DEAD", "你本局放过胡，不能再胡")
             if self.cfg.require_ting and not view.ting.get(seat):
                 return Result(False, "NEED_TING", "还没报听，不能胡")
             c = list(counts)
