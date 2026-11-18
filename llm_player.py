@@ -267,6 +267,7 @@ class LLMPlayer:
         think_seconds: float = 3600.0,
         budget_react: int = 1000,
         budget_discard: int = 3000,
+        budget_ting: int = 200,
         budget_tiny: int = 40,
         debug_cache: bool = False,
     ) -> None:
@@ -286,6 +287,7 @@ class LLMPlayer:
         # 剩下的 max_tokens 留给说话和工具调用。吃叉 1000、打牌 3000。
         self.budget_react = budget_react
         self.budget_discard = budget_discard
+        self.budget_ting = budget_ting         # 报听之后手牌锁死，没什么好想的
         self.budget_tiny = budget_tiny       # 补刀那一遍：够它把话翻成调用就行
         self.debug_cache = debug_cache       # 每次请求后打一行命中率
         self.cache_stats: list[dict] = []
@@ -396,8 +398,25 @@ class LLMPlayer:
         self.on_progress(kind, n_think, n_say)
 
     def _budget_for(self, d: Decision) -> int:
-        """吃叉、报不报听只是判断接不接，1000 够；打牌要摊四组面子，给 3000。"""
+        """吃叉、报不报听只是判断接不接，1000 够；打牌要摊四组面子，给 3000。
+
+        已经报了听的座位手牌锁死，只剩"打回刚摸的这张"这一件事：
+        除了能胡、能杠（还有后开花）值得认真想，其余一律给最低预算。
+        """
+        if self._declared(d):
+            return self.budget_discard if self._big_choice(d) else self.budget_ting
         return self.budget_react if d.kind in ("react", "ting_declare") else self.budget_discard
+
+    @staticmethod
+    def _declared(d: Decision) -> bool:
+        """这一手是不是发生在"已经报过听"之后。"""
+        ting = d.view.get("ting") or {}
+        return bool(ting.get(d.seat) or ting.get(str(d.seat)))
+
+    @staticmethod
+    def _big_choice(d: Decision) -> bool:
+        """能胡、能杠、能后开花：这几下值得把预算给满。"""
+        return any(a.kind in ("win", "kan", "bloom") for a in d.legal)
 
     def _headline(self, d: Decision) -> str:
         """一句话说清现在是什么时刻，别让它自己猜。"""
@@ -1029,6 +1048,20 @@ def _selftest() -> int:
     case("能胡了", p2._headline(win_only), "【能胡了】")
     case("现在可以吃叉", p2._headline(pon_only), "【现在可以吃叉】")
     case("轮到你出牌了", p2._headline(d), "【轮到你出牌了】")
+
+    # 5b-2 报听之后只给最低预算，除非这一手能胡/能杠
+    tinged = dict(d.view)
+    tinged["ting"] = {**{s: False for s in range(4)}, 0: True}
+    tired = Decision(seat=0, kind="discard", view=tinged,
+                     legal=[Action("discard", tile=parse_tile(notin))])
+    case("报听之后打牌只给最低预算", p2._budget_for(tired), 200)
+    kanning = Decision(seat=0, kind="discard", view=tinged,
+                       legal=[Action("kan", tile=parse_tile(notin)), Action("discard", tile=parse_tile(notin))])
+    case("报听之后能杠，预算给满", p2._budget_for(kanning), 3000)
+    tingwin = Decision(seat=0, kind="react", view=tinged,
+                       legal=[Action("win"), Action("pass")])
+    case("报听之后能胡，预算给满", p2._budget_for(tingwin), 3000)
+    case("没报听时该想的还想", p2._budget_for(d), 3000)
 
     # 5c 工具表必须一个字都不变：它渲染在提示词最前面，随牌变就等于整段前缀作废
     shape = lambda dd: json.dumps(dd.tools(), ensure_ascii=False, sort_keys=True)
