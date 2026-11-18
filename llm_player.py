@@ -39,6 +39,11 @@ DEFAULT_LOG = HERE / "llm_log.jsonl"
 # 旧存档里写进历史的占位话：模型会把它当成自己上一句台词照着念，一句都别再摆上桌
 _FILLERS = frozenset({"（闲下来想这手牌，还没想完）", "（闲下来想这手牌,还没想完）"})
 
+# 任何时候都能喊的两件事（不算这一手）：说两句停一下、记条临时笔记。
+# 以前只有"中场暂停 / 散场闲聊"才提，出牌那手它根本不知道还能这么干。
+_ALWAYS = ("；另外这两件随手就能喊：pause（这手先不打，停下来跟他说两句）、"
+           "edit_note（记临时笔记，target=temp，记完接着打这一手）")
+
 
 # ---------------------------------------------------------------- HTTP
 
@@ -374,7 +379,7 @@ class LLMPlayer:
             f"{wall_s}；上一张打出：{last_s}"
         )
 
-    def _actions_text(self, legal: Sequence[Action]) -> str:
+    def _actions_text(self, legal: Sequence[Action], *, always: bool = True) -> str:
         lines = []
         for a in legal:
             if a.kind == "discard":
@@ -387,7 +392,7 @@ class LLMPlayer:
                 lines.append("bloom（取牌墙最后一张胡）")
             else:
                 lines.append(a.kind)
-        return "、".join(lines)
+        return "、".join(lines) + (_ALWAYS if always else "")
 
     def _tick(self, kind: str, n_think: int, n_say: int) -> None:
         """流式心跳：正在想还是卡住了，外面想知道就接这个钩子（1.5 秒一次，别刷屏）。"""
@@ -429,7 +434,7 @@ class LLMPlayer:
             self._headline(d),
             "【牌桌】",
             self._describe(d.view),
-            f"【本轮只能做这些】{self._actions_text(d.legal)}",
+            f"【本轮只能做这些】{self._actions_text(d.legal, always=False)}",
             "这一手没得选，照着打下去就行。牌桌上说一句人话，不超过 20 字，不用调工具。",
         ])
         try:
@@ -511,6 +516,26 @@ class LLMPlayer:
                               on_delta=self._tick)
         self._note_cache("吃叉" if d.kind == "react" else "打牌", r1)
         speech = r1.speech
+
+        # 它这一手可能只想先记一笔临时笔记：写下去，再让它接着走这一手（记笔记不算一次动作）
+        if (r1.tool_call or {}).get("name") == "edit_note":
+            note_args = r1.tool_call.get("arguments") or {}
+            done = self._apply_note(note_args)
+            call_id = f"note_{len(self.messages)}"
+            self.messages += [
+                {"role": "assistant", "content": r1.speech,
+                 **({"reasoning_content": r1.reasoning} if r1.reasoning else {}),
+                 "tool_calls": [{"id": call_id, "type": "function",
+                                 "function": {"name": "edit_note",
+                                              "arguments": json.dumps(note_args, ensure_ascii=False)}}]},
+                {"role": "tool", "tool_call_id": call_id, "content": done},
+            ]
+            r1 = self.client.chat(self.messages, model=self.model, tools=d.tools(),
+                                  tool_choice="required", max_tokens=_room_for(self.budget_tiny),
+                                  reasoning_budget=self.budget_tiny, stream=True,
+                                  on_delta=self._tick)
+            self._note_cache("记完接着打", r1)
+            speech = speech or r1.speech
 
         # 它要中场暂停：这一手不打，把它的话原样带回牌桌，由外面接暂停流程
         # 同一个回合最多喊两次，防止它一直"我再想想"把牌局拖死
@@ -1147,6 +1172,26 @@ def _selftest() -> int:
     case("旧的那条没被冲掉", "老的一条" in note.read_text(encoding="utf-8"), True)
     case("调用带回了回执", any(m["role"] == "tool" for m in pN.messages), True)
     case("整局就这一张工具表", len(TOOLS), 10)
+
+    # 5f 随时能暂停、随时能记条临时笔记：这三处都得把它告诉到位
+    case("出牌那手也告诉它能暂停", "pause" in p2._user_prompt(d, 3000), True)
+    case("出牌那手也告诉它能记临时笔记", "edit_note" in p2._user_prompt(d, 3000), True)
+    case("报听锁死那手不吹这两件", _ALWAYS in p2._actions_text(tired.legal, always=False), False)
+
+    soft = Path(tempfile.gettempdir()) / "_mahjong_soft.md"
+    soft.write_text("", encoding="utf-8")
+    fcS = _FakeClient([
+        ChatResult(content="记一笔", tool_call={"name": "edit_note",
+                                               "arguments": {"mode": "append", "text": "p2 别急着打"}}),
+        ChatResult(tool_call={"name": "discard", "arguments": {"tile": pid}})])
+    pS = LLMPlayer(fcS, 0, log_path=None, soft_notes_path=soft)
+    actS, _ = pS.decide(d)
+    case("记完笔记照样把这一手打出来", (actS.kind, tile_id(actS.tile)), ("discard", pid))
+    case("临时笔记落盘了", "p2 别急着打" in soft.read_text(encoding="utf-8"), True)
+    case("记完再问一遍（共两次请求）", len(fcS.calls), 2)
+    case("第二遍只给小预算", fcS.calls[1]["reasoning_budget"], pS.budget_tiny)
+    tips = [m["content"] for m in pS.messages if m["role"] == "tool"]
+    case("调用带回了回执", bool(tips and tips[-1]), True)
 
     # 5i 中场暂停：他喊停，这一手就不打
     fcP = _FakeClient([ChatResult(content="等一下，我想问一句。",
