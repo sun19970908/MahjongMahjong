@@ -157,7 +157,7 @@ def describe(a: Action) -> str:
         return f"杠{face(tile_id(a.tile))[0].strip()}"
     if a.kind == "chi":
         return "吃" + "+".join(face(tile_id(t))[0].strip() for t in a.combo)
-    return {"win": "胡！", "pass": "过", "draw": "摸牌", "ting": "报听"}.get(a.kind, a.kind)
+    return {"win": "胡！", "bloom": "后开花！", "pass": "过", "draw": "摸牌", "ting": "报听"}.get(a.kind, a.kind)
 
 
 def draw_screen(text: str) -> None:
@@ -189,8 +189,10 @@ def apply_and_note(game: Game, act: Action, log: list[str], me: int) -> None:
         elif t == "ting":
             waits = "、".join(face(t)[0].strip() for t in (e.data or {}).get("waits", []))
             log.append(f"{SEAT[e.seat]} 报听" + (f"（等 {waits}）" if waits else ""))
+        elif t == "bloom":
+            log.append(f"{SEAT[e.seat]} 后开花 {name}")
         elif t == "win":
-            tag = "抢杠" if (e.data or {}).get("rob") else ""
+            tag = "抢杠" if (e.data or {}).get("rob") else ("后开花" if (e.data or {}).get("bloom") else "")
             log.append(f"*** {SEAT[e.seat]} {tag}胡了！")
         elif t == "draw_game":
             log.append("*** 荒庄：牌墙摸空")

@@ -86,6 +86,7 @@ TOOLS: list[dict] = [
     _tool("chi", "吃出顺子，给出你手里要用的两张，写成 一张+一张（如 s4+s6）",
           {"combo": {"type": "string"}}, ["combo"]),
     _tool("win", "宣布胡牌", {}, []),
+    _tool("bloom", "后开花：手里有杠、牌墙最后一张能把牌型补成胡时，直接取那张胡牌（不用报听）", {}, []),
     _tool("pass", "过，不要这张牌", {}, []),
     _tool("ting", "报听。手牌已经听牌、想锁死手牌等胡，就调它", {}, []),
     NOTE_TOOL,
@@ -196,9 +197,14 @@ class Game:
         if self.phase == "ended":
             return None
         if self.phase == "draw":
-            return self._decision(self.turn, "draw", [Action("draw")])
+            opts = [Action("draw")]
+            if self._can_bloom(self.turn):
+                opts.append(Action("bloom"))
+            return self._decision(self.turn, "draw", opts)
         if self.phase == "discard":
             legal = self.r.legal_actions(self._view(self.turn), self.turn)
+            if self._can_bloom(self.turn):
+                legal = legal + [Action("bloom")]
             return self._decision(self.turn, "discard", legal)
         if self.phase == "react":
             if not self.reactors:
@@ -206,7 +212,10 @@ class Game:
             rank, dist, seat, options = self.reactors[0]
             return self._decision(seat, "react", options + [Action("pass")])
         if self.phase == "kan_draw":
-            return self._decision(self.turn, "draw", [Action("draw")])
+            opts = [Action("draw")]
+            if self._can_bloom(self.turn):
+                opts.append(Action("bloom"))
+            return self._decision(self.turn, "draw", opts)
         if self.phase == "ting_declare":
             return self._decision(self.turn, "ting_declare", [Action("ting"), Action("pass")])
         raise RuntimeError(f"未知阶段 {self.phase}")
@@ -227,7 +236,10 @@ class Game:
             raise RuntimeError(f"现在轮 {d.seat} 号，不是 {seat} 号")
         seat = d.seat
 
-        if d.kind == "draw" and action.kind == "draw":
+        if d.kind == "draw" and action.kind in ("draw", "bloom"):
+            if action.kind == "bloom":
+                self._do_bloom(seat)
+                return self.drain_events()
             self._do_draw(seat, kan=(self.phase == "kan_draw"))
             return self.drain_events()
 
@@ -287,7 +299,27 @@ class Game:
             self._do_kan(seat, action)
             return self.drain_events()
 
+        if action.kind == "bloom":
+            self._do_bloom(seat)
+            return self.drain_events()
+
         raise RuntimeError(f"自己回合不接受 {action.kind}")
+
+    def _can_bloom(self, seat: int) -> bool:
+        """后开花：手里有杠，牌墙最后那张能把牌型补成胡。"""
+        if not self.r.cfg.allow_bloom or not self.wall:
+            return False
+        if not any(m.kind == "kan" for m in self.fixed[seat]):
+            return False
+        c = list(self.hands[seat])
+        c[self.wall[-1]] += 1
+        return self.r.is_win(tuple(c), tuple(self.fixed[seat])).ok
+
+    def _do_bloom(self, seat: int) -> None:
+        tile = self.wall.pop()               # 取的是牌墙最后一张（明牌）
+        self.hands[seat][tile] += 1
+        self._emit(Event("bloom", seat, tile, {"wall": len(self.wall)}))
+        self._end_win(seat, tile=tile, zimo=True, bloom=True)
 
     def _ready(self, seat: int) -> bool:
         """手里 13 张（或减掉副露后对应的张数）听没听牌。"""
@@ -455,7 +487,8 @@ class Game:
         self.last = None
 
     # ---------- 结束 ----------
-    def _end_win(self, seat: int, tile: int | None, *, zimo: bool, from_seat: int | None = None, rob: bool = False) -> None:
+    def _end_win(self, seat: int, tile: int | None, *, zimo: bool, from_seat: int | None = None,
+                 rob: bool = False, bloom: bool = False) -> None:
         self.phase = "ended"
         self.result = {
             "type": "win",
@@ -464,9 +497,10 @@ class Game:
             "zimo": zimo,
             "from": from_seat,
             "rob": rob,
+            "bloom": bloom,
             "settle": self.settle({"seat": seat, "zimo": zimo, "from": from_seat}),
         }
-        self._emit(Event("win", seat, tile, {"zimo": zimo, "from": from_seat, "rob": rob}))
+        self._emit(Event("win", seat, tile, {"zimo": zimo, "from": from_seat, "rob": rob, "bloom": bloom}))
 
     def _end_draw_game(self) -> None:
         self.phase = "ended"
@@ -516,6 +550,7 @@ class Game:
             fixed={s: tuple(self.fixed[s]) for s in range(self.cfg.seats)},
             discards={s: tuple(self.discards[s]) for s in range(self.cfg.seats)},
             wall_left=len(self.wall),
+            wall_last=self.wall[-1] if self.wall else None,
             last=self.last if last is None else last,
             ting=dict(self.ting),
             drawn=self.drawn if (self.drawn is not None and seat == self.turn) else None,
@@ -554,6 +589,8 @@ def random_policy(rng: random.Random | None = None) -> Callable[[Decision], Acti
         kinds = {a.kind for a in d.legal}
         if "win" in kinds:
             return next(a for a in d.legal if a.kind == "win")
+        if "bloom" in kinds:         # 后开花也是胡，先拿了
+            return next(a for a in d.legal if a.kind == "bloom")
         if "ting" in kinds:          # 听牌就报，不报永远胡不了
             return next(a for a in d.legal if a.kind == "ting")
         for k, p in (("kan", 0.9), ("pon", 0.5), ("chi", 0.3)):
@@ -591,6 +628,12 @@ def _selftest() -> int:
         if not ok:
             fails += 1
             print(f"      期望 {want}，实际 {got}")
+
+    def _h(tiles: str) -> list[int]:
+        out = [0] * KINDS
+        for x in tiles.split():
+            out[parse_tile(x)] += 1
+        return out
 
     # 1 发牌
     g = Game(GameConfig(seats=3, seed=7))
@@ -635,6 +678,35 @@ def _selftest() -> int:
     case("碰压过吃", (g.pending().seat, g.pending().kind), (2, "react"))
     case("碰的选项里有碰", any(a.kind == "pon" for a in g.pending().legal), True)
 
+    # 7 后开花：手里有杠，牌墙最后一张正好能把牌型补成胡
+    g = Game(GameConfig(seed=14))
+    g.start()
+    for s in range(4):
+        g.hands[s] = [0] * KINDS
+        g.fixed[s] = []
+        g.discards[s] = []
+    p4, p9 = parse_tile("4饼"), parse_tile("9饼")
+    g.fixed[0] = [Meld("kan", (p4, p4, p4, p4))]
+    g.hands[0] = _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼")
+    g.wall = deque([parse_tile("1万")] * 5 + [p9])
+    g.turn, g.phase, g.last, g.drawn = 0, "draw", None, None
+    d = g.pending()
+    case("有杠就能后开花", [a.kind for a in d.legal], ["draw", "bloom"])
+    ev = g.apply(Action("bloom"))
+    case("后开花就是胡", (g.result["type"], g.result["seat"], g.result["bloom"]), ("win", 0, True))
+    case("取走的是牌墙最后一张", (ev[0].tile, len(g.wall)), (p9, 5))
+
+    g = Game(GameConfig(seed=15))
+    g.start()
+    for s in range(4):
+        g.hands[s] = [0] * KINDS
+        g.fixed[s] = []
+        g.discards[s] = []
+    g.hands[0] = _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼 9饼 1饼")
+    g.wall = deque([parse_tile("1万")] * 5 + [p9])
+    g.turn, g.phase, g.last, g.drawn = 0, "draw", None, None
+    case("手里没杠不能后开花", [a.kind for a in g.pending().legal], ["draw"])
+
     # 4 杠后从牌头补一张（用加杠验同一条路径）
     g = Game(GameConfig(seats=3, seed=2))
     g.start()
@@ -657,12 +729,6 @@ def _selftest() -> int:
     case("补张后牌墙少一张", len(g.wall), before_wall - 1)
 
     # 6 抢杠：已报听的人可以胡别人加杠的那张
-    def _h(tiles: str) -> list[int]:
-        out = [0] * KINDS
-        for x in tiles.split():
-            out[parse_tile(x)] += 1
-        return out
-
     def rob_setup(listen: bool) -> Game:
         g = Game(GameConfig(seed=11))
         g.start()

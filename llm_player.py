@@ -346,6 +346,8 @@ class LLMPlayer:
                 lines.append(f"{a.kind} {tile_id(a.tile)}")
             elif a.kind == "chi":
                 lines.append(f"chi {'+'.join(tile_id(t) for t in a.combo)}")
+            elif a.kind == "bloom":
+                lines.append("bloom（取牌墙最后一张胡）")
             else:
                 lines.append(a.kind)
         return "、".join(lines)
@@ -358,6 +360,8 @@ class LLMPlayer:
         """一句话说清现在是什么时刻，别让它自己猜。"""
         if d.kind == "ting_declare":
             return "【手牌听牌了，报不报？】"
+        if any(a.kind == "bloom" for a in d.legal):
+            return "【能后开花】"
         if any(a.kind == "win" for a in d.legal):
             return "【能胡了】"
         if d.kind == "react":
@@ -534,6 +538,8 @@ class LLMPlayer:
             return Action("pass")
         if name == "ting":
             return Action("ting")
+        if name == "bloom":
+            return Action("bloom")
         raise ValueError(f"不认识的动作 {name}")
 
     @staticmethod
@@ -973,7 +979,7 @@ def _selftest() -> int:
     case("打牌和吃叉用的是同一张工具表", shape(d) == shape(pon_only), True)
     case("能胡和不能胡也是同一张", shape(win_only) == shape(d), True)
     case("工具表带齐整套动作", [t["function"]["name"] for t in d.tools()],
-         ["discard", "pon", "kan", "chi", "win", "pass", "ting", "edit_note", "pause"])
+         ["discard", "pon", "kan", "chi", "win", "bloom", "pass", "ting", "edit_note", "pause"])
     case("打牌那几件 schema 里不塞牌名",
          any("enum" in json.dumps(t) for t in d.tools()[:6]), False)
 
@@ -983,7 +989,7 @@ def _selftest() -> int:
     pC = LLMPlayer(fcC, 0, log_path=None)
     reply1 = pC.chat("我刚才打得怎么样")
     case("第一句带开场说明", "【散场闲聊】" in fcC.calls[0]["messages"][-1]["content"], True)
-    case("闲聊也带整张工具表", len(fcC.calls[0]["tools"]), 9)
+    case("闲聊也带整张工具表", len(fcC.calls[0]["tools"]), 10)
     case("闲聊不强制调用", fcC.calls[0]["tool_choice"], "auto")
     case("它说什么就显示什么", reply1, "你那张 s1 打早了。")
     case("一问一答都进历史", (pC.messages[-2]["role"], pC.messages[-1]["role"]), ("user", "assistant"))
@@ -1005,7 +1011,7 @@ def _selftest() -> int:
     case("笔记真的落盘了", "p2 别急着打" in note.read_text(encoding="utf-8"), True)
     case("旧的那条没被冲掉", "老的一条" in note.read_text(encoding="utf-8"), True)
     case("调用带回了回执", any(m["role"] == "tool" for m in pN.messages), True)
-    case("整局就这一张工具表", len(TOOLS), 9)
+    case("整局就这一张工具表", len(TOOLS), 10)
 
     # 5i 中场暂停：他喊停，这一手就不打
     fcP = _FakeClient([ChatResult(content="等一下，我想问一句。",

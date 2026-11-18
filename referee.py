@@ -189,6 +189,7 @@ class RuleConfig:
     allow_pon: bool = True
     allow_kan: bool = True
     allow_kan_in_hand: bool = True      # 手里四张直接明杠（亮出来，可被抢）
+    allow_bloom: bool = True            # 后开花：有杠的人直接取牌墙最后一张胡，不用报听
 
     # 以后补规则的容器，避免为了加个开关去改 dataclass
     extra: dict = field(default_factory=dict)
@@ -336,6 +337,7 @@ class HandView:
     fixed: dict[int, tuple[Meld, ...]] = field(default_factory=dict)
     discards: dict[int, tuple[int, ...]] = field(default_factory=dict)
     wall_left: int | None = None
+    wall_last: int | None = None                 # 牌墙最后一张（明牌）
     last: tuple[int, str, int] | None = None   # (出牌者, 'discard', 牌)
     ting: dict[int, bool] = field(default_factory=dict)   # 谁已经报听了
     drawn: int | None = None                    # 自己回合刚摸进来的那张
@@ -506,6 +508,18 @@ class Referee:
             if view.ting.get(seat) and view.drawn is not None and action.tile != view.drawn:
                 return Result(False, "TING_LOCKED", "报听后只能把刚摸进来的那张打回去")
             return Result(True, "OK")
+        if action.kind == "bloom":
+            # 后开花：手里有杠，牌墙最后一张正好能把牌型补成胡，直接取走，不用报听
+            if not self.cfg.allow_bloom:
+                return Result(False, "NO_BLOOM", "这局没有后开花")
+            if view.wall_last is None:
+                return Result(False, "WALL_EMPTY", "牌墙没牌了")
+            if not any(m.kind == "kan" for m in fixed):
+                return Result(False, "NO_KAN", "手里没有杠，不能后开花")
+            c = list(counts)
+            c[view.wall_last] += 1
+            r = self.is_win(tuple(c), fixed)
+            return Result(r.ok, r.code if r.ok else "BLOOM_NO_WIN", r.detail)
         if action.kind == "win":
             if self.cfg.require_ting and not view.ting.get(seat):
                 return Result(False, "NEED_TING", "还没报听，不能胡")
@@ -731,6 +745,17 @@ def _selftest() -> int:
     KK = [a for a in r.legal_actions(vK, 0) if a.kind == "kan"]
     case("报听后还能加杠", [(a.tile, (a.meta or {}).get("kind")) for a in KK],
          [(parse_tile("7饼"), "added")])
+
+    # 11c 后开花：有杠 + 牌墙最后一张能胡，且不用报听
+    vB = HandView(seat=0, seats=3, hands={0: _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼")},
+                  fixed={0: (Meld("kan", (parse_tile("4饼"),) * 4),)}, wall_last=parse_tile("9饼"), last=None)
+    case("有杠能后开花（不用报听）", r.validate(vB, 0, Action("bloom")).ok, True)
+    vB2 = HandView(seat=0, seats=3, hands={0: _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼")},
+                   fixed={}, wall_last=parse_tile("9饼"), last=None)
+    case("没杠不能后开花", r.validate(vB2, 0, Action("bloom")).code, "NO_KAN")
+    vB3 = HandView(seat=0, seats=3, hands={0: _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼")},
+                   fixed={0: (Meld("kan", (parse_tile("4饼"),) * 4),)}, wall_last=parse_tile("1饼"), last=None)
+    case("最后一张补不成胡也不行", r.validate(vB3, 0, Action("bloom")).code, "BLOOM_NO_WIN")
 
     # 12 出牌校验
     v2 = HandView(seat=0, seats=3, hands={0: _h(h13)}, last=None)
