@@ -706,8 +706,6 @@ class LLMPlayer:
         first = not self._chatted
         said = (head + text) if first else text
         self._chatted = True
-        # 只有明说要记/改才准动笔记，别它一高兴就把笔记翻写了
-        allow_note = any(k in text for k in ("笔记", "记下", "记一条", "加一条", "记一笔", "记一下"))
         self.messages.append({"role": "user", "content": said})
         try:
             r = self._chat_call(budget)
@@ -715,8 +713,9 @@ class LLMPlayer:
             self.messages.pop()
             return f"（没接上话：{e}）"
         if r.tool_call and r.tool_call.get("name") == "edit_note":
-            done = (self._apply_note(r.tool_call.get("arguments") or {}) if allow_note
-                    else "这轮没人让你动笔记，没改。要改就说一声。")
+            # 笔记是它的，它想记就记：拦住只会让它以为引擎坏了（"你再试试"也照样被拒）。
+            # 局中能动的只有临时笔记、长期笔记要到散场，这条界线由 _apply_note 把。
+            done = self._apply_note(r.tool_call.get("arguments") or {})
             call_id = f"note_{len(self.messages)}"
             self.messages.append({
                 "role": "assistant", "content": r.speech,
@@ -1171,6 +1170,15 @@ def _selftest() -> int:
     case("笔记真的落盘了", "p2 别急着打" in note.read_text(encoding="utf-8"), True)
     case("旧的那条没被冲掉", "老的一条" in note.read_text(encoding="utf-8"), True)
     case("调用带回了回执", any(m["role"] == "tool" for m in pN.messages), True)
+    # 谁都没提"笔记"，它自己想记也得让它记：以前按字眼卡，硬试两次都被挡，像引擎坏了
+    fcN2 = _FakeClient([ChatResult(tool_call={"name": "edit_note",
+                                              "arguments": {"mode": "append", "text": "没人提也照记"}}),
+                        ChatResult(content="记好了。")])
+    pN2 = LLMPlayer(fcN2, 0, log_path=None, notes_path=note)
+    pN2.chat("你再试试，不应该不让改啊")
+    case("没人提笔记时它想记也照记", "没人提也照记" in note.read_text(encoding="utf-8"), True)
+    case("回执不再是那句挡人的话",
+         any("没人让你动笔记" in m["content"] for m in pN2.messages), False)
     case("整局就这一张工具表", len(TOOLS), 10)
 
     # 5f 随时能暂停、随时能记条临时笔记：这三处都得把它告诉到位
@@ -1224,15 +1232,15 @@ def _selftest() -> int:
     pL.chat("把笔记加一条", phase="pause")
     case("局中动长期笔记会被挡", noteL.read_text(encoding="utf-8").strip(), "")
 
-    # 5f 没让它改就不许自己动手
+    # 5f 没让它改也可以自己记：以前按字眼卡，硬试两次都被挡，它会以为引擎坏了
     note2 = Path(tempfile.gettempdir()) / "_mahjong_note2.md"
     note2.write_text("- 原来的\n", encoding="utf-8")
     fcU = _FakeClient([
         ChatResult(tool_call={"name": "edit_note", "arguments": {"mode": "append", "text": "我顺手记一条"}}),
         ChatResult(content="说回牌，你那张 m9 留得对。")])
     pU = LLMPlayer(fcU, 0, log_path=None, notes_path=note2)
-    case("没让它改就照样聊", pU.chat("刚才那手怎么样"), "说回牌，你那张 m9 留得对。")
-    case("文件原样没动", note2.read_text(encoding="utf-8").strip(), "- 原来的")
+    case("没让它改也照样聊下去", pU.chat("刚才那手怎么样"), "说回牌，你那张 m9 留得对。")
+    case("它想记就记，不再拦", "我顺手记一条" in note2.read_text(encoding="utf-8"), True)
 
     # 5g 多行笔记别被揉成一行
     note3 = Path(tempfile.gettempdir()) / "_mahjong_note3.md"
