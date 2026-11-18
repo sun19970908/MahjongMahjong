@@ -25,7 +25,7 @@ import os
 import random
 import time
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from game import Action, Decision, random_policy
 from referee import parse_tile
@@ -118,7 +118,7 @@ class ExternalPlayer(BasePlayer):
     """
 
     def __init__(self, seat: int, root: Path | str | None = None, poll: float = 0.05,
-                 wait: float = 0.0) -> None:
+                 wait: float = 0.0, on_wait: Callable[[float], None] | None = None) -> None:
         super().__init__(seat)
         self.dir = Path(root or DEFAULT_SEAT_ROOT) / f"seat{seat}"
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -127,6 +127,7 @@ class ExternalPlayer(BasePlayer):
         self.poll = poll
         self.wait = wait
         self.round = 0
+        self.on_wait = on_wait          # 等待期间每秒回一次（给 TUI 报个"已等 N 秒"）
 
     # ---- 文件 ----
     def _pending_path(self) -> Path:
@@ -156,6 +157,7 @@ class ExternalPlayer(BasePlayer):
         self._write_atomic(self._pending_path(), req)
 
         t0 = time.monotonic()
+        beat = t0
         while True:
             if (self.dir / "give-up").exists():
                 (self.dir / "give-up").unlink()
@@ -180,6 +182,9 @@ class ExternalPlayer(BasePlayer):
             if self.wait and time.monotonic() - t0 > self.wait:
                 self._pending_path().unlink(missing_ok=True)
                 return random_policy(random.Random())(d), "（等太久，随机代打）"
+            if self.on_wait and time.monotonic() - beat >= 1.0:   # 每秒报一次，TUI 上那个秒数在走=还活着
+                beat = time.monotonic()
+                self.on_wait(beat - t0)
             time.sleep(self.poll)
 
 

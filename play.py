@@ -294,6 +294,7 @@ def main() -> int:
     if saved:
         log: list[str] = list(meta.get("log") or [])
         say = str(meta.get("say") or "")
+        say_by = int(meta.get("say_by") if meta.get("say_by") is not None else -1)
         steps = int(meta.get("steps") or 0)
         if llm and meta.get("llm"):
             llm.impl.messages = list(meta["llm"].get("messages") or llm.impl.messages)
@@ -304,14 +305,22 @@ def main() -> int:
         game.start()
         log = []
         say = ""
+        say_by = -1
         steps = 0
+
+    def said_text() -> str:
+        """台词标的是说这话的那个人，不是此刻轮到的这个人。"""
+        if not say:
+            return ""
+        who = names.get(say_by, "")
+        return f"{who}：{say}" if who else say
 
     def persist() -> None:
         if args.no_save:
             return
         state.save(STATE_PATH, game, {
             "you": me, "buddy": buddy, "agent": agent,
-            "steps": steps, "say": say, "log": log[-30:], "phase": game.phase,
+            "steps": steps, "say": say, "say_by": say_by, "log": log[-30:], "phase": game.phase,
             "llm": None if not llm else {"messages": llm.impl.messages,
                                          "pause_calls": llm.impl._pause_calls},
         })
@@ -330,10 +339,18 @@ def main() -> int:
 
         status = ("你听牌了，报不报？（/p 中场暂停）" if d.kind == "ting_declare" and p.supports == "human"
                   else "轮到你了（/p 中场暂停）" if p.supports == "human"
-                  else f"{p.name} 等待接入，牌局停在这一手" if p.supports == "external"
+                  else f"{p.name} 接入中……" if p.supports == "external"
                   else f"{p.name} 在算……" if p.supports == "llm" else p.name)
+
+        def show_wait(sec: float, name: str = p.name) -> None:
+            """等接入位的时候每秒重画一次：那个秒数在走，就说明牌子没死在这儿。"""
+            draw_screen(screen(game, me, buddy, f"{name} 接入中…… 已等 {sec:.0f}s（不接就超时自动走一手）",
+                               log, say=said_text(), names=names))
+
+        if p.supports == "external":
+            p.on_wait = show_wait
         draw_screen(screen(game, me, buddy, status, log, d.legal if p.supports == "human" else None,
-                           say=f"{p.name}：{say}" if say else "", names=names))
+                           say=said_text(), names=names))
 
         t0 = time.time()
         act, speech = p.decide(d)
@@ -350,6 +367,7 @@ def main() -> int:
             continue
 
         say = speech
+        say_by = d.seat
         log.append(f"{SEAT[d.seat]} 出手 {paint(f'[{took:.1f}s]', DIM)}")
         if tracer:
             row = {"seat": d.seat, "name": p.name, "decision": d.kind, "action": act.to_dict(),
@@ -364,13 +382,13 @@ def main() -> int:
         steps += 1
         persist()
         if args.steps and steps >= args.steps:
-            draw_screen(screen(game, me, buddy, f"走到第 {steps} 步打住", log, say=say, names=names))
+            draw_screen(screen(game, me, buddy, f"走到第 {steps} 步打住", log, say=said_text(), names=names))
             break
 
     else:
         res = game.result or {}
         msg = "荒庄：牌墙摸空" if res.get("type") == "draw_game" else str(res)
-        draw_screen(screen(game, me, buddy, msg, log, say=say, names=names))
+        draw_screen(screen(game, me, buddy, msg, log, say=said_text(), names=names))
 
     if llm:
         print(f" 牌友出牌 {len(llm.impl.records)} 次，兜底 "
@@ -396,3 +414,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

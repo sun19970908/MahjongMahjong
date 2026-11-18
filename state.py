@@ -2,6 +2,9 @@
 
 只存"这局现在是什么样子"：牌墙、四家手牌、副露、河、轮到谁、待反应的人，
 外加谁坐哪、第几步、牌友的对话历史（不存它就不记得这局，调试也没意义）。
+
+注意：`hands` 存的是**计数数组**（长度 28 = 9+9+9+1 种牌各自的张数），
+不是牌名序列。直接看会把它当成 28 张手牌——那是错的，手牌张数要 sum()。
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ def snapshot(game: Game, meta: dict | None = None) -> dict:
         "cfg": {"seats": game.cfg.seats, "start_hand": game.cfg.start_hand,
                 "dealer": game.cfg.dealer, "seed": game.cfg.seed},
         "game": {
+            "hands_format": "counts",          # 计数数组，不是牌名；手牌张数 = sum(counts)
             "wall": [tile_id(t) for t in game.wall],
             "hands": {str(s): list(v) for s, v in game.hands.items()},
             "fixed": {str(s): [_meld_out(m) for m in v] for s, v in game.fixed.items()},
@@ -57,6 +61,8 @@ def snapshot(game: Game, meta: dict | None = None) -> dict:
             "ting": {str(s): bool(v) for s, v in game.ting.items()},
             "dead": {str(s): bool(v) for s, v in game.dead_win.items()},
             "drawn": None if game.drawn is None else tile_id(game.drawn),
+            "last_draw": None if game.last_draw is None
+            else {"seat": game.last_draw[0], "tile": tile_id(game.last_draw[1])},
         },
         "meta": meta or {},
     }
@@ -87,6 +93,8 @@ def restore(data: dict) -> tuple[Game, dict]:
     game.dead_win = {s: bool(dead.get(str(s), False)) for s in range(game.cfg.seats)}
     drawn = gs.get("drawn")
     game.drawn = None if drawn is None else parse_tile(drawn)
+    last_draw = gs.get("last_draw")
+    game.last_draw = None if not last_draw else (int(last_draw["seat"]), parse_tile(last_draw["tile"]))
     return game, (data.get("meta") or {})
 
 

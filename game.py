@@ -178,6 +178,7 @@ class Game:
         self.ting: dict[int, bool] = {s: False for s in range(config.seats)}   # 谁报听了
         self.dead_win: dict[int, bool] = {s: False for s in range(config.seats)}  # 谁放过胡了：本局不准再胡
         self.drawn: int | None = None                                        # 刚摸进来的那张
+        self.last_draw: tuple[int, int] | None = None                        # 全场最后一次摸牌（谁、什么），荒庄复盘用
 
     # ---------- 开局 ----------
     def start(self) -> list[Event]:
@@ -481,6 +482,7 @@ class Game:
         tile = self.wall.popleft()
         self.hands[seat][tile] += 1
         self.drawn = tile
+        self.last_draw = (seat, tile)      # 摸一张记一张：荒庄时最后一张明牌归谁，就靠这个
         self._emit(Event("kan_draw" if kan else "draw", seat, tile, {"wall": len(self.wall)}))
         self.phase = "discard"
         self.last = None
@@ -503,8 +505,11 @@ class Game:
 
     def _end_draw_game(self) -> None:
         self.phase = "ended"
-        self.result = {"type": "draw_game", "reason": "wall_empty", "wall": 0}
-        self._emit(Event("draw_game", data={"reason": "wall_empty"}))
+        last = self.last_draw
+        self.result = {"type": "draw_game", "reason": "wall_empty", "wall": 0,
+                       "last_draw": None if last is None else {"seat": last[0], "tile": tile_id(last[1])}}
+        self._emit(Event("draw_game", data={"reason": "wall_empty",
+                                            "last_draw": self.result["last_draw"]}))
 
     def settle(self, ctx: dict) -> dict:
         """结算以后再说，现在把口子留给裁判。"""
@@ -790,7 +795,8 @@ def _selftest() -> int:
         g.discards[s] = []
     p7 = parse_tile("7饼")
     g.hands[0] = _h("7饼 7饼 7饼 7饼 2条 3条 4条 1饼 2饼 3饼 9条 9条 9条 4饼")
-    g.hands[1] = _h("1万 2万 3万 4万 5万 6万 5条 5条 5条 9饼 9饼 8饼 9饼")
+    # 单听 7 饼：多留一张 8 饼就成了双听（等 7 饼和 8 饼），双听不算听，抢不了杠
+    g.hands[1] = _h("1万 2万 3万 4万 5万 6万 5条 5条 5条 9饼 9饼 6饼 8饼")
     g.ting = {0: True, 1: True, 2: False, 3: False}
     g.wall.extend([parse_tile("1万")] * 20)
     g.turn, g.phase, g.last, g.drawn = 0, "discard", None, p7

@@ -420,6 +420,34 @@ class LLMPlayer:
         """能胡、能杠、能后开花：这几下值得把预算给满。"""
         return any(a.kind in ("win", "kan", "bloom") for a in d.legal)
 
+    def _speak(self, d: Decision, budget: int) -> str:
+        """锁死的手也要出声：只要一句话，不要结论。
+
+        问和答成对落历史，不然下一手就出现"没有问题的 assistant"，模型和缓存都别扭。
+        """
+        prompt = "\n".join([
+            self._headline(d),
+            "【牌桌】",
+            self._describe(d.view),
+            f"【本轮只能做这些】{self._actions_text(d.legal)}",
+            "这一手没得选，照着打下去就行。牌桌上说一句人话，不超过 20 字，不用调工具。",
+        ])
+        try:
+            r = self.client.chat(self.messages + [{"role": "user", "content": prompt}],
+                                 model=self.model, tools=TOOLS, tool_choice="auto",
+                                 max_tokens=_room_for(budget), reasoning_budget=budget)
+        except Exception:                                     # 说不出话就别拦着出牌
+            return ""
+        said = r.speech.strip()
+        if said in _FILLERS or (said and said == self._last_say):
+            said = ""
+        if said:
+            self._last_say = said
+        self.messages.append({"role": "user", "content": prompt})
+        self.messages.append({"role": "assistant", "content": said,
+                              **({"reasoning_content": r.reasoning} if r.reasoning else {})})
+        return said
+
     def _headline(self, d: Decision) -> str:
         """一句话说清现在是什么时刻，别让它自己猜。"""
         if d.kind == "ting_declare":
@@ -455,12 +483,16 @@ class LLMPlayer:
 
     # ---- 决策 ----
     def decide(self, d: Decision) -> tuple[Action | None, str]:
-        # 只有一个选项（摸牌、必过）：不用问模型，省一次二十秒。
-        # 这时候不掐自由思考——它手会借此继续想，紧接着的出牌还能用上。
+        # 只有一个选项（摸牌、必过、报听后打回刚摸的那张）：不用问模型，省一次二十秒。
+        # 但报听之后牌桌上还得有人味——那一手虽然锁死了，也低预算问一句，让它开口。
         if len(d.legal) == 1:
             act = d.legal[0]
-            self.records.append(TurnRecord(len(self.records), "", act, source="auto"))
-            return act, ""
+            say = ""
+            if d.kind == "discard" and self._declared(d):
+                self.cut_prefetch()
+                say = self._speak(d, self.budget_ting)
+            self.records.append(TurnRecord(len(self.records), say, act, source="auto"))
+            return act, say
 
         # 真要落子了：先掐断还在飞的自由思考，把通道让出来；
         # 然后照常进"打牌思考"——吃叉 1000 token，打牌 3000 token。
