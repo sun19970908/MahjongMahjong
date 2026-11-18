@@ -160,9 +160,16 @@ def main() -> int:
     def make_impl():
         """每一手一个新脑子：不背上一手的历史，提示词短、回得快。"""
         from llm_player import LLMPlayer, StrataClient
-        return LLMPlayer(StrataClient(), args.seat,
-                         log_path=HERE / f"seat{args.seat}_log.jsonl", model=args.model,
-                         budget_react=args.budget_react, budget_discard=args.budget_discard)
+        fresh = LLMPlayer(StrataClient(), args.seat,
+                          log_path=HERE / f"seat{args.seat}_log.jsonl", model=args.model,
+                          budget_react=args.budget_react, budget_discard=args.budget_discard)
+
+        def tick(kind: str, n_think: int, n_say: int) -> None:
+            note(f"　{'想' if kind == 'think' else '说'} {n_think} 字" +
+                 (f" / 已开口 {n_say} 字" if n_say else ""))
+
+        fresh.on_progress = tick        # 流式心跳：正在想 / 卡住了，日志里看得出来
+        return fresh
 
     impl = make_impl() if args.brain == "model" else None
     note(f"上工：{args.seat} 号，脑子 {args.brain}" + (f"（{args.model}）" if impl else ""))

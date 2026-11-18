@@ -320,8 +320,8 @@ class Game:
         self._end_win(seat, tile=tile, zimo=True, bloom=True)
 
     def _ready(self, seat: int) -> bool:
-        """手里 13 张（或减掉副露后对应的张数）听没听牌。"""
-        return bool(self.r.waits(self.hands[seat], self.fixed[seat]))
+        """听没听牌。规则里「不能有两张或以上胡牌」，所以双听不算，只认单听。"""
+        return self.r.tenpai(self.hands[seat], self.fixed[seat]).ok
 
     def _do_ting_declare(self, seat: int, action: Action) -> list[Event]:
         if action.kind not in ("ting", "pass"):
@@ -461,7 +461,8 @@ class Game:
             v = HandView(seat=s, seats=self.cfg.seats, hands={s: tuple(self.hands[s])},
                          fixed={s: tuple(self.fixed[s])}, last=(owner, "discard", tile))
             c = list(self.hands[s]); c[tile] += 1
-            if self.r.is_win(tuple(c), tuple(self.fixed[s])).ok:
+            if (self.r.is_win(tuple(c), tuple(self.fixed[s])).ok
+                    and self.r.waiting_on(self.hands[s], tile, tuple(self.fixed[s]))):
                 out.append((s, [Action("win", tile=tile, meta={"from": owner, "rob": True})]))
         return out
 
@@ -763,7 +764,7 @@ def _selftest() -> int:
         p7 = parse_tile("7饼")
         g.hands[0] = _h("7饼 1万 2万 3万 4条 5条 6条 8条 8条 9饼 9饼")
         g.fixed[0] = [Meld("triplet", (p7, p7, p7))]
-        g.hands[1] = _h("1万 2万 3万 4万 5万 6万 1条 2条 3条 9饼 9饼 7饼 7饼")
+        g.hands[1] = _h("1万 2万 3万 4万 5万 6万 5条 5条 5条 9饼 9饼 6饼 8饼")   # 单听 7 饼
         g.hands[2] = _h("2万 2万 2万 4万 4万 4万 6条 6条 6条 8饼 8饼 8饼 9条")
         g.hands[3] = _h("3万 3万 3万 5万 5万 5万 7条 7条 7条 1饼 1饼 1饼 9条")
         g.ting = {0: True, 1: listen, 2: False, 3: False}
@@ -859,7 +860,7 @@ def _selftest() -> int:
             g.fixed[s] = []
             g.discards[s] = []
         g.hands[0] = _h("7饼 3万 4万 5万 1条 2条 3条 5饼 6饼 1饼 4饼 1饼 9条")
-        g.hands[1] = _h("1万 2万 3万 4万 5万 6万 1条 2条 3条 9饼 9饼 7饼 7饼")
+        g.hands[1] = _h("1万 2万 3万 4万 5万 6万 5条 5条 5条 9饼 9饼 6饼 8饼")   # 单听 7 饼
         g.ting[1] = True
         g.wall.extend([parse_tile("1万")] * 20)
         g.turn, g.phase, g.last, g.drawn = 0, "discard", None, None
@@ -907,6 +908,24 @@ def _selftest() -> int:
     g.dead_win[0] = True
     g.turn, g.phase, g.last, g.drawn = 0, "kan_draw", None, None
     case("弃胡的人不给后开花", [a.kind for a in g.pending().legal], ["draw"])
+
+    # 6h 双听的手：不算听牌、不许报听、也胡不了（图里那手：碰 5饼 + 445566万 + 123饼 + 77条）
+    g = Game(GameConfig(seed=23))
+    g.start()
+    for s in range(4):
+        g.hands[s] = [0] * KINDS
+        g.fixed[s] = []
+        g.discards[s] = []
+    g.hands[0] = _h("4万 4万 5万 5万 6万 1饼 2饼 3饼 7条 7条")
+    g.fixed[0] = [Meld("triplet", (p5, p5, p5))]
+    g.wall.extend([parse_tile("1万")] * 20)
+    g.turn, g.phase, g.last, g.drawn = 0, "discard", None, None
+    case("双听不算听牌", g._ready(0), False)
+    case("双听的听牌集合是 3万6万", [tile_id(t) for t in g.r.waits(g.hands[0], g.fixed[0])], ["m3", "m6"])
+    g.ting[0] = True
+    g.hands[0][parse_tile("6万")] += 1
+    g.drawn = parse_tile("6万")
+    case("双听的手不给胡", g.r.validate(g._view(0), 0, Action("win")).code, "MULTI_WAIT")
 
     # 6f 后开花那一下选择正常摸牌，不算弃胡
     g = Game(GameConfig(seed=14))

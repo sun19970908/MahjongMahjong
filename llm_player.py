@@ -96,6 +96,7 @@ class StrataClient:
         reasoning_budget: int | None = None,
         on_response: Callable | None = None,
         stream: bool = False,
+        on_delta: Callable | None = None,
     ) -> ChatResult:
         body: dict = {"model": model, "messages": messages, "max_tokens": max_tokens,
                       "temperature": temperature}
@@ -117,6 +118,7 @@ class StrataClient:
         if stream:
             content: list[str] = []
             reasoning: list[str] = []
+            calls: dict[int, dict] = {}      # 流式也把工具调用拼起来，不然拿不到落子
             finish = ""
             aborted = False
             usage: dict | None = None
@@ -143,13 +145,36 @@ class StrataClient:
                             content.append(delta["content"])
                         if delta.get("reasoning_content"):
                             reasoning.append(delta["reasoning_content"])
+                        for tcall in delta.get("tool_calls") or []:
+                            slot = calls.setdefault(int(tcall.get("index", 0)),
+                                                    {"id": "", "name": "", "arguments": ""})
+                            if tcall.get("id"):
+                                slot["id"] = tcall["id"]
+                            fn = tcall.get("function") or {}
+                            if fn.get("name"):
+                                slot["name"] = fn["name"]
+                            if fn.get("arguments"):
+                                slot["arguments"] += fn["arguments"]
                         if choice.get("finish_reason"):
                             finish = choice["finish_reason"]
+                        if on_delta:
+                            on_delta("think" if delta.get("reasoning_content") else "say",
+                                     len("".join(reasoning)), len("".join(content)))
                 except Exception:
                     aborted = True       # 连接被掐：已经吐出来的照样带走，别扔
             prompt_tokens, cached_tokens = _usage_of(usage)
+            tc = None
+            for slot in calls.values():
+                if not slot["name"]:
+                    continue
+                try:
+                    args = json.loads(slot["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                tc = {"name": slot["name"], "arguments": args}
+                break
             return ChatResult(content="".join(content), reasoning="".join(reasoning),
-                              seconds=round(time.monotonic() - t0, 2), finish=finish,
+                              tool_call=tc, seconds=round(time.monotonic() - t0, 2), finish=finish,
                               aborted=aborted, prompt_tokens=prompt_tokens, cached_tokens=cached_tokens)
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             if on_response:
@@ -264,6 +289,8 @@ class LLMPlayer:
         self._chatted = False                # 中场暂停 / 散场闲聊有没有开过口
         self._phase = "play"                 # play / pause / after：笔记权限按这个分
         self._pause_calls = 0                # 这一回合它喊了几次暂停
+        self.on_progress: Callable | None = None   # 流式心跳钩子：(kind, 想字, 说字)
+        self._tick_at = 0.0
 
         self.messages: list[dict] = [{"role": "system", "content": self._system_prompt()}]
         self.records: list[TurnRecord] = []
@@ -354,6 +381,16 @@ class LLMPlayer:
                 lines.append(a.kind)
         return "、".join(lines)
 
+    def _tick(self, kind: str, n_think: int, n_say: int) -> None:
+        """流式心跳：正在想还是卡住了，外面想知道就接这个钩子（1.5 秒一次，别刷屏）。"""
+        if not self.on_progress:
+            return
+        now = time.monotonic()
+        if now - self._tick_at < 1.5:
+            return
+        self._tick_at = now
+        self.on_progress(kind, n_think, n_say)
+
     def _budget_for(self, d: Decision) -> int:
         """吃叉、报不报听只是判断接不接，1000 够；打牌要摊四组面子，给 3000。"""
         return self.budget_react if d.kind in ("react", "ting_declare") else self.budget_discard
@@ -413,7 +450,8 @@ class LLMPlayer:
         # 预算到点由引擎自己收尾，剩下的 token 留给"说一句话 + 调工具"。
         r1 = self.client.chat(self.messages, model=self.model, tools=d.tools(),
                               tool_choice="required", max_tokens=_room_for(budget),
-                              reasoning_budget=budget)
+                              reasoning_budget=budget, stream=True,
+                              on_delta=self._tick)
         self._note_cache("吃叉" if d.kind == "react" else "打牌", r1)
         speech = r1.speech
 

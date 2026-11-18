@@ -436,6 +436,22 @@ class Referee:
         names = "、".join(tile_name(t) for t in ws)
         return TenpaiResult(False, "MULTI_WAIT", tuple(ws), f"听 {len(ws)} 张：{names}")
 
+    def waiting_on(self, counts, tile: int, fixed: Sequence[Meld] = (), *,
+                   held: bool = False) -> bool:
+        """这一手是不是「就等这一张」。
+
+        held=True 时 counts 里已经含着这张（自摸后的 14 张），先拿掉它再算；
+        否则 counts 是等牌的那手（别人打的 / 抢杠），直接算。
+        规则里「不能有两张或以上胡牌」，所以双听的手不许报听、也不许胡。
+        """
+        base = list(_as_counts(counts))
+        if held:
+            if base[tile] <= 0:
+                return False
+            base[tile] -= 1
+        te = self.tenpai(tuple(base), fixed)
+        return te.ok and tile in te.waits
+
     # ---- 动作合法性 ----
     def _chi_combos(self, counts: Sequence[int], t: int) -> list[tuple[int, int]]:
         s = suit_of(t)
@@ -461,7 +477,9 @@ class Referee:
         ting = bool(view.ting.get(seat))
         dead = bool(view.dead.get(seat))
         if own_turn:
-            if not dead and self.is_win(counts, fixed).ok and (not self.cfg.require_ting or ting):
+            if (not dead and self.is_win(counts, fixed).ok
+                    and (not self.cfg.require_ting or ting)
+                    and (view.drawn is None or self.waiting_on(counts, view.drawn, fixed, held=True))):
                 out.append(Action("win"))
             if ting:
                 # 报听之后手牌锁死：只能把刚摸进来的那张打回去（杠例外）
@@ -482,7 +500,9 @@ class Referee:
         src, kind, tile = view.last
         if kind == "discard":
             c = list(counts); c[tile] += 1
-            if not dead and self.is_win(tuple(c), fixed).ok and (not self.cfg.require_ting or ting):
+            if (not dead and self.is_win(tuple(c), fixed).ok
+                    and (not self.cfg.require_ting or ting)
+                    and self.waiting_on(counts, tile, fixed)):
                 out.append(Action("win", tile=tile, meta={"from": src}))
             if not ting:
                 if self.cfg.allow_pon and counts[tile] >= 2:
@@ -535,7 +555,21 @@ class Referee:
             if view.last and view.last[0] != seat and view.last[1] == "discard":
                 c[view.last[2]] += 1
             r = self.is_win(tuple(c), fixed)
-            return Result(r.ok, r.code if r.ok else "ILLEGAL_WIN", r.detail)
+            if not r.ok:
+                return Result(False, "ILLEGAL_WIN", r.detail)
+            # 「不能有两张或以上胡牌」：这一手之前必须是单听，且就等这张
+            if view.last and view.last[0] != seat and view.last[1] == "discard":
+                tile, base = view.last[2], list(counts)
+            else:
+                tile, base = view.drawn, list(counts)
+                if tile is not None and base[tile] > 0:
+                    base[tile] -= 1
+            if tile is None:
+                return Result(True, "OK")
+            te = self.tenpai(tuple(base), fixed)
+            if not (te.ok and tile in te.waits):
+                return Result(False, "MULTI_WAIT", te.detail or "这一手不是单听，不能胡")
+            return Result(True, "OK")
         if action.kind == "kan" and own_turn:
             kind = (action.meta or {}).get("kind")
             if action.tile is None:
