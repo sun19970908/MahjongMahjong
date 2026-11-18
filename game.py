@@ -44,7 +44,6 @@ from referee import (
 # 反应优先级：胡 > 杠 > 碰 > 吃
 PRIORITY = {"win": 4, "kan": 3, "pon": 2, "chi": 1}
 CLAIMS = ("win", "kan", "pon", "chi")
-WIN_KINDS = ("win", "bloom")        # 能把牌胡掉的那两种动作
 
 
 def _tool(name: str, desc: str, props: dict, required: list[str]) -> dict:
@@ -234,8 +233,9 @@ class Game:
             raise RuntimeError(f"现在轮 {d.seat} 号，不是 {seat} 号")
         seat = d.seat
 
-        # 能胡的时候不胡（打牌、碰、吃、杠、摸牌、过），这一局就不准再胡了
-        if action.kind not in WIN_KINDS and any(a.kind in WIN_KINDS for a in d.legal):
+        # 能胡的时候不胡（打牌、碰、吃、杠、过都算），这一局就不准再胡了。
+        # 后开花不算：那一下选择正常摸牌只是没开花，资格还在。
+        if action.kind != "win" and any(a.kind == "win" for a in d.legal):
             self.dead_win[seat] = True
             self._emit(Event("dead", seat, data={"by": d.kind}))
 
@@ -907,6 +907,30 @@ def _selftest() -> int:
     g.dead_win[0] = True
     g.turn, g.phase, g.last, g.drawn = 0, "kan_draw", None, None
     case("弃胡的人不给后开花", [a.kind for a in g.pending().legal], ["draw"])
+
+    # 6f 后开花那一下选择正常摸牌，不算弃胡
+    g = Game(GameConfig(seed=14))
+    g.start()
+    for s in range(4):
+        g.hands[s] = [0] * KINDS
+        g.fixed[s] = []
+        g.discards[s] = []
+    g.fixed[0] = [Meld("kan", (p4, p4, p4, p4))]
+    g.hands[0] = _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼")
+    g.wall = deque([parse_tile("1万")] * 5 + [p9])
+    g.turn, g.phase, g.last, g.drawn = 0, "kan_draw", None, None
+    g.apply(Action("draw"))
+    case("不开花不算弃胡", g.dead_win[0], False)
+    g.hands[0] = _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼 9饼")   # 杠在桌上，所以手里 11 张就够胡
+    g.ting[0] = True
+    g.turn, g.phase, g.last = 0, "discard", None
+    case("不开花之后照样能胡", any(a.kind == "win" for a in g.pending().legal), True)
+
+    # 6g 抢杠不抢也算弃胡
+    g = rob_setup(listen=True)
+    case("抢杠面前有胡和过", [a.kind for a in g.pending().legal], ["win", "pass"])
+    g.apply(Action("pass"))
+    case("不抢杠就锁死", g.dead_win[1], True)
 
     # 5 荒庄：牌墙摸空
     g = Game(GameConfig(seats=3, seed=3))
