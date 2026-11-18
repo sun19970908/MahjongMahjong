@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.log
+*.out
+*.err
+*.jsonl
+state.json
+临时笔记.md
+seats/
