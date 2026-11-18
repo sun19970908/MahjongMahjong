@@ -172,6 +172,23 @@ def cmd_trace(args) -> int:
     return 0
 
 
+def cmd_log(args) -> int:
+    """打牌时看见的问题，随手记一条；局终一次性交代。"""
+    path = Path(args.file)
+    if args.list:
+        print(path.read_text(encoding="utf-8").rstrip() if path.exists() else "还没有问题记录")
+        return 0
+    text = " ".join(args.text).strip()
+    if not text:
+        print("要写点什么", file=sys.stderr)
+        return 1
+    line = f"- {time.strftime('%m-%d %H:%M')} {text}"
+    with path.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    print(line)
+    return 0
+
+
 def _talk_path(seat: int, which: str) -> Path:
     return seat_dir(seat) / f"talk_{which}.jsonl"
 
@@ -241,6 +258,12 @@ def main() -> int:
     p.add_argument("-n", type=int, default=20)
     p.add_argument("--file", default=str(Path(__file__).resolve().parent / "trace.jsonl"))
     p.set_defaults(func=cmd_trace)
+
+    p = sub.add_parser("log", help="打牌时发现问题就记一条，局终一起交代")
+    p.add_argument("text", nargs="*")
+    p.add_argument("-l", "--list", action="store_true")
+    p.add_argument("--file", default=str(Path(__file__).resolve().parent / "问题.md"))
+    p.set_defaults(func=cmd_log)
 
     p = sub.add_parser("hear", help="读他在递话窗口里说的话")
     p.add_argument("--seat", type=int, default=2)
