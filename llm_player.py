@@ -268,6 +268,7 @@ class LLMPlayer:
         budget_react: int = 1000,
         budget_discard: int = 3000,
         budget_ting: int = 200,
+        budget_chat: int = 3000,
         budget_tiny: int = 40,
         debug_cache: bool = False,
     ) -> None:
@@ -288,6 +289,7 @@ class LLMPlayer:
         self.budget_react = budget_react
         self.budget_discard = budget_discard
         self.budget_ting = budget_ting         # 报听之后手牌锁死，没什么好想的
+        self.budget_chat = budget_chat         # 聊天单独一档，不吃出牌那份低预算
         self.budget_tiny = budget_tiny       # 补刀那一遍：够它把话翻成调用就行
         self.debug_cache = debug_cache       # 每次请求后打一行命中率
         self.cache_stats: list[dict] = []
@@ -631,12 +633,14 @@ class LLMPlayer:
         return legal[0]
 
     # ---- 说话：中场暂停 / 散场闲聊共用 ----
-    def chat(self, text: str, *, budget: int = 3000, phase: str = "after") -> str:
+    def chat(self, text: str, *, budget: int | None = None, phase: str = "after") -> str:
         """跟它说话。phase=after 是散场闲聊，phase=pause 是牌局中途暂停。
 
         接在同一段历史后面发，工具表整局一张，前缀缓存照旧命中。
+        预算单算一档：报听后的低预算只管出牌，聊天永远满额。
         """
         self._phase = phase
+        budget = self.budget_chat if budget is None else budget
         head = ("【中场暂停】牌先停在这儿，不急着出。随便聊，想记就记临时笔记"
                 "（edit_note 用 target=temp；长期笔记等打完再改）。\n"
                 if phase == "pause" else
@@ -1053,7 +1057,8 @@ def _selftest() -> int:
     tinged = dict(d.view)
     tinged["ting"] = {**{s: False for s in range(4)}, 0: True}
     tired = Decision(seat=0, kind="discard", view=tinged,
-                     legal=[Action("discard", tile=parse_tile(notin))])
+                     legal=[Action("discard", tile=parse_tile(notin)),
+                            Action("discard", tile=parse_tile(pid))])
     case("报听之后打牌只给最低预算", p2._budget_for(tired), 200)
     kanning = Decision(seat=0, kind="discard", view=tinged,
                        legal=[Action("kan", tile=parse_tile(notin)), Action("discard", tile=parse_tile(notin))])
@@ -1086,6 +1091,15 @@ def _selftest() -> int:
     case("第二句不再重复开场", "【散场闲聊】" in fcC.calls[1]["messages"][-1]["content"], False)
     case("闲聊预算给到 3000", fcC.calls[1]["reasoning_budget"], 3000)
     case("闲聊的 max_tokens 跟着给足", fcC.calls[1]["max_tokens"], 4000)
+
+    # 5d-2 报听的低预算只管出牌，散场聊天照旧满额
+    fcT = _FakeClient([ChatResult(content="打这张", tool_call={"name": "discard", "arguments": {"tile": notin}}),
+                       ChatResult(content="这局你打得太保守了。")])
+    pT = LLMPlayer(fcT, 0, log_path=None)
+    pT.decide(tired)
+    case("出牌吃的是低预算", fcT.calls[0]["reasoning_budget"], 200)
+    pT.chat("我打得怎么样")
+    case("报听之后聊天预算恢复满", fcT.calls[-1]["reasoning_budget"], 3000)
 
     # 5e 打完能改笔记
     import tempfile
