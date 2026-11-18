@@ -59,7 +59,7 @@ def show(req: dict) -> None:
     if v.get("last"):
         last = v["last"]
         print(f"上一张：{last.get('seat')} 号打 {last.get('tile')}")
-    print(f"牌墙剩 {v.get('wall_left')} 张")
+    print(f"牌墙剩 {v.get('wall_left')} 张" + (f"，明牌 {v['wall_last']}" if v.get("wall_last") else ""))
     for i, a in enumerate(req.get("legal") or [], 1):
         body = a.get("tile") or a.get("combo") or ""
         if isinstance(body, list):

@@ -320,12 +320,15 @@ class LLMPlayer:
         table = "；".join(f"{s}号：{' '.join(t) if t else '—'}" for s, t in view["discards"].items())
         last = view.get("last")
         last_s = f"{last['seat']}号 打了 {last['tile']}" if last else "—"
+        wall_s = f"牌墙还剩 {view['wall_left']} 张"
+        if view.get("wall_last"):
+            wall_s += f"，最后一张（明牌）是 {view['wall_last']}"
         return (
             f"你手里的 {len(view['hand'])} 张：{hand}\n"
             f"你已成的面子：{fixed_s}\n"
             f"场上已成的面子（公开）：{others}\n"
             f"牌河：{table}\n"
-            f"牌墙还剩 {view['wall_left']} 张；上一张打出：{last_s}"
+            f"{wall_s}；上一张打出：{last_s}"
         )
 
     def _actions_text(self, legal: Sequence[Action]) -> str:

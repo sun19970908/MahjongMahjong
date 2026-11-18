@@ -187,6 +187,7 @@ class RuleConfig:
     allow_chi: bool = True
     allow_pon: bool = True
     allow_kan: bool = True
+    allow_closed_kan: bool = False      # 这局不许暗杠；明杠、加杠照旧
 
     # 以后补规则的容器，避免为了加个开关去改 dataclass
     extra: dict = field(default_factory=dict)
@@ -459,7 +460,7 @@ class Referee:
                     out.append(Action("discard", tile=t))
             if self.cfg.allow_kan:
                 for t in range(KINDS):
-                    if counts[t] >= 4:
+                    if self.cfg.allow_closed_kan and counts[t] >= 4:
                         out.append(Action("kan", tile=t, meta={"kind": "closed"}))
                     elif counts[t] >= 1 and any(m.is_triplet_like and m.tiles[0] == t for m in fixed):
                         out.append(Action("kan", tile=t, meta={"kind": "added"}))
@@ -504,6 +505,8 @@ class Referee:
             if action.tile is None:
                 return Result(False, "NO_TILE", "没说杠哪张")
             if kind == "closed":
+                if not self.cfg.allow_closed_kan:
+                    return Result(False, "KAN_CLOSED", "这局不许暗杠")
                 if counts[action.tile] < 4:
                     return Result(False, "NOT_ENOUGH", f"暗杠要手里四张{tile_name(action.tile)}")
                 return Result(True, "OK")

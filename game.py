@@ -454,6 +454,7 @@ class Game:
             "discards": {s: [tile_id(t) for t in self.discards[s]] for s in range(self.cfg.seats)},
             "hand_sizes": {s: sum(self.hands[s]) for s in range(self.cfg.seats)},
             "wall_left": len(self.wall),
+            "wall_last": tile_id(self.wall[-1]) if self.wall else None,   # 最后一张是明牌，谁都能看
             "last": None if self.last is None else {"seat": self.last[0], "tile": tile_id(self.last[2])},
             "can_win": self.r.is_win(tuple(self.hands[seat]), tuple(self.fixed[seat])).ok if self.phase == "discard" and self.turn == seat else False,
             "pending": None if d is None else {"seat": d.seat, "kind": d.kind},
@@ -589,21 +590,22 @@ def _selftest() -> int:
     case("碰压过吃", (g.pending().seat, g.pending().kind), (2, "react"))
     case("碰的选项里有碰", any(a.kind == "pon" for a in g.pending().legal), True)
 
-    # 4 杠后从牌头补一张
+    # 4 杠后从牌头补一张（这局不许暗杠，用加杠验同一条路径）
     g = Game(GameConfig(seats=3, seed=2))
     g.start()
     g.hands[0] = [0] * KINDS
     tile = parse_tile("5条")
-    g.hands[0][tile] = 4
-    for i in range(20):
-        g.hands[0][parse_tile("1万")] = 1
+    g.fixed[0] = [Meld("triplet", (tile, tile, tile))]
+    g.hands[0][tile] = 1
+    g.hands[0][parse_tile("1万")] = 9
     g.turn, g.phase, g.last = 0, "discard", None
     before_wall = len(g.wall)
     before_head = g.wall[0]
     d = g.pending()
+    case("暗杠不在选项里", any(a.kind == "kan" and (a.meta or {}).get("kind") == "closed" for a in d.legal), False)
     kan = next(a for a in d.legal if a.kind == "kan" and a.tile == tile)
     g.apply(kan)
-    case("暗杠后进入补张", g.phase, "kan_draw")
+    case("加杠后进入补张", g.phase, "kan_draw")
     ev = g.apply(Action("draw"))
     case("补张从牌头摸", ev[0].tile, before_head)
     case("补张后牌墙少一张", len(g.wall), before_wall - 1)

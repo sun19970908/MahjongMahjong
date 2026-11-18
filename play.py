@@ -96,7 +96,10 @@ def screen(game: Game, me: int, buddy: int, status: str, log: list[str],
            names: dict[int, str] | None = None) -> str:
     v = game.observe(me)
     out = [RULE]
-    out.append(f" 牌墙 {v['wall_left']:>3} 张".ljust(20) + paint(status, MINE))
+    wall = f" 牌墙 {v['wall_left']:>3} 张"
+    if v.get("wall_last"):
+        wall += f" · 明牌 {v['wall_last']}"
+    out.append(wall.ljust(20) + paint(status, MINE))
     if say:
         out.append(" " + paint(say, DIM))
     out.append(RULE)
