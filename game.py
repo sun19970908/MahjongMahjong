@@ -222,7 +222,7 @@ class Game:
         seat = d.seat
 
         if d.kind == "draw" and action.kind == "draw":
-            self._do_draw(seat, tail=(self.phase == "kan_draw"))
+            self._do_draw(seat, kan=(self.phase == "kan_draw"))
             return self.drain_events()
 
         if d.kind == "discard":
@@ -404,13 +404,14 @@ class Game:
         self.phase = "react" if self.reactors else "draw"
 
     # ---------- 摸牌 ----------
-    def _do_draw(self, seat: int, tail: bool = False) -> None:
+    def _do_draw(self, seat: int, kan: bool = False) -> None:
+        """摸牌一律从牌头取；杠后补张也是牌头那一张，只是事件名不同。"""
         if not self.wall:
             self._end_draw_game()
             return
-        tile = self.wall.pop() if tail else self.wall.popleft()
+        tile = self.wall.popleft()
         self.hands[seat][tile] += 1
-        self._emit(Event("kan_draw" if tail else "draw", seat, tile, {"wall": len(self.wall)}))
+        self._emit(Event("kan_draw" if kan else "draw", seat, tile, {"wall": len(self.wall)}))
         self.phase = "discard"
         self.last = None
 
@@ -588,7 +589,7 @@ def _selftest() -> int:
     case("碰压过吃", (g.pending().seat, g.pending().kind), (2, "react"))
     case("碰的选项里有碰", any(a.kind == "pon" for a in g.pending().legal), True)
 
-    # 4 杠后从牌尾补一张
+    # 4 杠后从牌头补一张
     g = Game(GameConfig(seats=3, seed=2))
     g.start()
     g.hands[0] = [0] * KINDS
@@ -598,13 +599,13 @@ def _selftest() -> int:
         g.hands[0][parse_tile("1万")] = 1
     g.turn, g.phase, g.last = 0, "discard", None
     before_wall = len(g.wall)
-    before_tail = g.wall[-1]
+    before_head = g.wall[0]
     d = g.pending()
     kan = next(a for a in d.legal if a.kind == "kan" and a.tile == tile)
     g.apply(kan)
     case("暗杠后进入补张", g.phase, "kan_draw")
     ev = g.apply(Action("draw"))
-    case("补张从牌尾摸", ev[0].tile, before_tail)
+    case("补张从牌头摸", ev[0].tile, before_head)
     case("补张后牌墙少一张", len(g.wall), before_wall - 1)
 
     # 5 荒庄：牌墙摸空
