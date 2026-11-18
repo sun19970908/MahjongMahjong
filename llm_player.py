@@ -324,6 +324,9 @@ class LLMPlayer:
         head = (
             "你是「豆包工作」，一桌麻将里的牌友。四个玩家，另外两人随机出牌。\n"
             "说话像牌友，记账像会计。你说的话会直接显示在牌桌上。\n"
+            "嘴上不交底：自己手上有什么、在等哪张、还差几组面子，一概不说；"
+            "从别人亮出的面子、弃牌里推出来的结论也别在牌桌上讲。\n"
+            "要开口就说场面话（催牌、玩笑、叹手气），真判断只写进笔记。\n"
             "规则（原文，以此为准）：\n"
             f"{self._read_rules()}\n"
             "报听要主动调 ting：手牌听牌之后报听，报听后手牌锁死——只能把刚摸进来的那张打回去，"
@@ -435,7 +438,7 @@ class LLMPlayer:
             "【牌桌】",
             self._describe(d.view),
             f"【本轮只能做这些】{self._actions_text(d.legal, always=False)}",
-            "这一手没得选，照着打下去就行。牌桌上说一句人话，不超过 20 字，不用调工具。",
+            "这一手没得选，照着打下去就行。牌桌上说一句人话，不超过 20 字（别报手牌、别报在等哪张），不用调工具。",
         ])
         try:
             r = self.client.chat(self.messages + [{"role": "user", "content": prompt}],
@@ -482,7 +485,7 @@ class LLMPlayer:
             # 这一行每手都变，但它本来就在最尾巴上，前面几万 token 照样复用。
             f"【本轮只能做这些】{self._actions_text(d.legal)}",
             "只能从上表里挑一个，调表外的动作会被判无效。",
-            "先说一句话跟牌桌上说点什么（不超过 25 字），然后必须调用工具选一个。",
+            "先说一句话跟牌桌上说点什么（不超过 25 字，别报手牌、别报在等哪张），然后必须调用工具选一个。",
         ]
         return "\n".join(parts)
 
@@ -1092,6 +1095,8 @@ def _selftest() -> int:
     p2 = LLMPlayer(_FakeClient([ChatResult(content=f"打 {pid}")]), 0, log_path=None)
     prompt = p2._user_prompt(d, p2._budget_for(d))
     case("笔记进 system 只一次", p2.messages[0]["content"].count("【你的笔记】"), 1)
+    case("开场就交代嘴上不交底", "嘴上不交底" in p2.messages[0]["content"], True)
+    case("出牌那句也提醒别报手牌", "别报手牌" in prompt, True)
     case("user 里不再重复笔记", "【你的笔记】" in prompt, False)
     case("局面提醒在最上方", prompt.startswith("【轮到你出牌了】"), True)
     case("牌桌在提醒之后", prompt.index("【牌桌】") > prompt.index("【轮到你出牌了】"), True)
