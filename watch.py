@@ -138,9 +138,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seat", type=int, default=2)
     ap.add_argument("--interval", type=float, default=0.1)
-    ap.add_argument("--brain", choices=["fast", "model"], default="fast",
-                    help="fast=不到 0.1 秒的脚本脑；model=模型脑，一手十几秒")
+    ap.add_argument("--brain", choices=["fast", "model"], default="model",
+                    help="model=模型脑（默认）；fast=不到 0.1 秒的脚本脑")
     ap.add_argument("--model", default="strata-lowthink")
+    ap.add_argument("--budget-react", type=int, default=500)
+    ap.add_argument("--budget-discard", type=int, default=1200)
     ap.add_argument("--dry", action="store_true")
     args = ap.parse_args()
 
@@ -152,11 +154,14 @@ def main() -> int:
         log.write(line + "\n")
         log.flush()
 
-    impl = None
-    if args.brain == "model":
+    def make_impl():
+        """每一手一个新脑子：不背上一手的历史，提示词短、回得快。"""
         from llm_player import LLMPlayer, StrataClient
-        impl = LLMPlayer(StrataClient(), args.seat,
-                         log_path=HERE / f"seat{args.seat}_log.jsonl", model=args.model)
+        return LLMPlayer(StrataClient(), args.seat,
+                         log_path=HERE / f"seat{args.seat}_log.jsonl", model=args.model,
+                         budget_react=args.budget_react, budget_discard=args.budget_discard)
+
+    impl = make_impl() if args.brain == "model" else None
     note(f"上工：{args.seat} 号，脑子 {args.brain}" + (f"（{args.model}）" if impl else ""))
 
     done = 0
@@ -188,6 +193,8 @@ def main() -> int:
             continue
         seat_io.atomic_write(seat_io.seat_dir(args.seat) / "answer.json",
                              {"round": done, "action": payload, "say": say})
+        if args.brain == "model":
+            impl = make_impl()          # 换新脑子，别背着历史越跑越慢
     return 0
 
 
