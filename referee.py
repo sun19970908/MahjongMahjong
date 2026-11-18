@@ -509,17 +509,19 @@ class Referee:
                 return Result(False, "TING_LOCKED", "报听后只能把刚摸进来的那张打回去")
             return Result(True, "OK")
         if action.kind == "bloom":
-            # 后开花：手里有杠，牌墙最后一张正好能把牌型补成胡，直接取走，不用报听
+            # 后开花：手里有杠，这手只等牌墙最后那一张，就取它胡。要单听，但不要求报听
             if not self.cfg.allow_bloom:
                 return Result(False, "NO_BLOOM", "这局没有后开花")
             if view.wall_last is None:
                 return Result(False, "WALL_EMPTY", "牌墙没牌了")
             if not any(m.kind == "kan" for m in fixed):
                 return Result(False, "NO_KAN", "手里没有杠，不能后开花")
-            c = list(counts)
-            c[view.wall_last] += 1
-            r = self.is_win(tuple(c), fixed)
-            return Result(r.ok, r.code if r.ok else "BLOOM_NO_WIN", r.detail)
+            te = self.tenpai(counts, fixed)
+            if not te.ok:
+                return Result(False, "BLOOM_MULTI_WAIT", te.detail)
+            if view.wall_last not in te.waits:
+                return Result(False, "BLOOM_NOT_WAIT", f"这手等的不是{tile_name(view.wall_last)}")
+            return Result(True, "OK")
         if action.kind == "win":
             if self.cfg.require_ting and not view.ting.get(seat):
                 return Result(False, "NEED_TING", "还没报听，不能胡")
@@ -755,7 +757,13 @@ def _selftest() -> int:
     case("没杠不能后开花", r.validate(vB2, 0, Action("bloom")).code, "NO_KAN")
     vB3 = HandView(seat=0, seats=3, hands={0: _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼")},
                    fixed={0: (Meld("kan", (parse_tile("4饼"),) * 4),)}, wall_last=parse_tile("1饼"), last=None)
-    case("最后一张补不成胡也不行", r.validate(vB3, 0, Action("bloom")).code, "BLOOM_NO_WIN")
+    case("最后一张补不成胡也不行", r.validate(vB3, 0, Action("bloom")).code, "BLOOM_NOT_WAIT")
+
+    # 11d 双听的手不能后开花：三四饼等 2 饼和 5 饼
+    vB4 = HandView(seat=0, seats=3,
+                   hands={0: _h("1万 2万 3万 4条 5条 6条 3饼 4饼 9饼 9饼")},
+                   fixed={0: (Meld("kan", (parse_tile("7饼"),) * 4),)}, wall_last=parse_tile("5饼"), last=None)
+    case("双听的手不能后开花", r.validate(vB4, 0, Action("bloom")).code, "BLOOM_MULTI_WAIT")
 
     # 12 出牌校验
     v2 = HandView(seat=0, seats=3, hands={0: _h(h13)}, last=None)
