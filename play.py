@@ -361,7 +361,7 @@ def main() -> int:
             draw_screen(screen(game, me, buddy, "牌先停着", log, say=said_text(), names=names))
             opener = speech
             actor = p.name
-            if p.supports == "human" and talker:   # 我按的暂停：让牌友先说一句
+            if p.supports == "human" and talker:   # 我按的暂停：让牌友先说一句（chat 自己会把空闲思考掐掉）
                 opener = talker.chat("（我按了暂停，先停一下，想跟你说两句）", phase="pause") or ""
                 actor = names.get(buddy, "")
             pause_talk(talker, buddy, opener, actor)

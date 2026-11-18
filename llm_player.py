@@ -274,7 +274,6 @@ class LLMPlayer:
         budget_discard: int = 3000,
         budget_ting: int = 200,
         budget_chat: int = 3000,
-        budget_pause: int = 300,
         budget_tiny: int = 40,
         debug_cache: bool = False,
     ) -> None:
@@ -296,8 +295,6 @@ class LLMPlayer:
         self.budget_discard = budget_discard
         self.budget_ting = budget_ting         # 报听之后手牌锁死，没什么好想的
         self.budget_chat = budget_chat         # 聊天单独一档，不吃出牌那份低预算
-        # 暂停那一刻牌是停着的，它没东西可算：给一点点就好，别让人对着"牌先停着"干等
-        self.budget_pause = budget_pause
         self.budget_tiny = budget_tiny       # 补刀那一遍：够它把话翻成调用就行
         self.debug_cache = debug_cache       # 每次请求后打一行命中率
         self.cache_stats: list[dict] = []
@@ -700,12 +697,14 @@ class LLMPlayer:
         """跟它说话。phase=after 是散场闲聊，phase=pause 是牌局中途暂停。
 
         接在同一段历史后面发，工具表整局一张，前缀缓存照旧命中。
-        预算分两档：散场闲聊满额（能慢慢想），中场暂停只给一点点——
-        牌都停着，它没什么可算，给满额只会让你对着"牌先停着"干等半分钟。
+        预算单算一档：报听后的低预算只管出牌，聊天永远满额（暂停也一样）。
+        要它别磨蹭，靠的是点暂停那一刻先把还在飞的自由思考掐掉，不是砍预算。
         """
         self._phase = phase
-        budget = (self.budget_chat if phase == "after" else self.budget_pause) \
-            if budget is None else budget
+        budget = self.budget_chat if budget is None else budget
+        # 有人开口之前，先把还在飞的自由思考掐掉：不然这条聊天排在它后面，
+        # 你得对着"牌先停着"等它把那手空想完。
+        self.cut_prefetch()
         head = ("【中场暂停】牌先停在这儿，不急着出。随便聊，想记就记临时笔记"
                 "（edit_note 用 target=temp；长期笔记等打完再改）。\n"
                 if phase == "pause" else
@@ -1167,12 +1166,11 @@ def _selftest() -> int:
     pT.chat("我打得怎么样")
     case("报听之后聊天预算恢复满", fcT.calls[-1]["reasoning_budget"], 3000)
 
-    # 5d-3 中场暂停那一刻不该给满额：牌停着，它没东西算，别让人干等
+    # 5d-3 暂停也拿满额预算，但点暂停那一刻要先把自由思考掐断（见 play.py）
     fcP2 = _FakeClient([ChatResult(content="先停着，你说。")])
     pP2 = LLMPlayer(fcP2, 0, log_path=None)
     pP2.chat("停一下", phase="pause")
-    case("暂停只给一点点思考", fcP2.calls[0]["reasoning_budget"], 300)
-    case("暂停的 max_tokens 跟着收", fcP2.calls[0]["max_tokens"], 812)
+    case("暂停聊天也是满额预算", fcP2.calls[0]["reasoning_budget"], 3000)
 
     # 5e 打完能改笔记
     import tempfile
@@ -1343,6 +1341,14 @@ def _selftest() -> int:
     p6._resp = sock2
     p6.decide(d_draw)
     case("摸牌不掐自由思考（留给紧接着的出牌）", sock2.closed, False)
+
+    # 8b 你点暂停：先把还在飞的空闲思考掐掉，别让你对着"牌先停着"等它想完
+    sock3 = _Sock()
+    fcQ = _FakeClient([ChatResult(content="先停着，你说。")])
+    pQ = LLMPlayer(fcQ, 0, log_path=None)
+    pQ._resp = sock3
+    pQ.chat("停一下", phase="pause")
+    case("一开口就掐断空闲思考", sock3.closed, True)
 
     # 9 被打断的半截不看丢：留在历史里，下一趟它自己看得见
     fc7 = _FakeClient([ChatResult(content="", reasoning="条子这边还差一张就成", aborted=True)])
