@@ -97,9 +97,13 @@ def screen(game: Game, me: int, buddy: int, status: str, log: list[str],
     v = game.observe(me)
     out = [RULE]
     wall = f" 牌墙 {v['wall_left']:>3} 张"
-    if v.get("wall_last"):
-        wall += f" · 明牌 {v['wall_last']}"
     out.append(wall.ljust(20) + paint(status, MINE))
+    if v.get("wall_last"):
+        # 牌墙最后一张是明牌：画成一张麻将摆在这儿，谁都看得见
+        block = tile3(v["wall_last"])
+        out.append(" " + paint("明牌 ", DIM) + block[0])
+        out.append(" " * 6 + block[1])
+        out.append(" " * 6 + block[2])
     if say:
         out.append(" " + paint(say, DIM))
     out.append(RULE)
