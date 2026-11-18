@@ -647,6 +647,40 @@ def _selftest() -> int:
     case("补张从牌头摸", ev[0].tile, before_head)
     case("补张后牌墙少一张", len(g.wall), before_wall - 1)
 
+    # 6 抢杠：已报听的人可以胡别人加杠的那张
+    def _h(tiles: str) -> list[int]:
+        out = [0] * KINDS
+        for x in tiles.split():
+            out[parse_tile(x)] += 1
+        return out
+
+    def rob_setup(listen: bool) -> Game:
+        g = Game(GameConfig(seed=11))
+        g.start()
+        for s in range(4):
+            g.hands[s] = [0] * KINDS
+            g.fixed[s] = []
+            g.discards[s] = []
+        p7 = parse_tile("7饼")
+        g.hands[0] = _h("7饼 1万 2万 3万 4条 5条 6条 8条 8条 9饼 9饼")
+        g.fixed[0] = [Meld("triplet", (p7, p7, p7))]
+        g.hands[1] = _h("1万 2万 3万 4万 5万 6万 1条 2条 3条 9饼 9饼 7饼 7饼")
+        g.hands[2] = _h("2万 2万 2万 4万 4万 4万 6条 6条 6条 8饼 8饼 8饼 9条")
+        g.hands[3] = _h("3万 3万 3万 5万 5万 5万 7条 7条 7条 1饼 1饼 1饼 9条")
+        g.ting = {0: True, 1: listen, 2: False, 3: False}
+        g.wall.extend([parse_tile("1万")] * 20)
+        g.turn, g.phase, g.last, g.drawn = 0, "discard", None, p7
+        g.apply(Action("kan", tile=p7, meta={"kind": "added"}))
+        return g
+
+    g = rob_setup(listen=True)
+    case("报听的人能抢别人加的杠", (g.pending() and g.pending().kind), "react")
+    d = g.pending()
+    case("抢杠的选项里有胡", [a.kind for a in d.legal], ["win", "pass"])
+    g.apply(next(a for a in d.legal if a.kind == "win"))
+    case("抢杠胡成立", (g.result["type"], g.result["seat"], g.result["rob"]), ("win", 1, True))
+    case("没报听的人抢不了杠", rob_setup(listen=False).phase, "kan_draw")
+
     # 5 荒庄：牌墙摸空
     g = Game(GameConfig(seats=3, seed=3))
     g.start()
