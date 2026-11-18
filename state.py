@@ -52,7 +52,7 @@ def snapshot(game: Game, meta: dict | None = None) -> dict:
             "last": None if game.last is None else [game.last[0], game.last[1], tile_id(game.last[2])],
             "reactors": [[rank, dist, seat, [_act_out(a) for a in opts]]
                          for rank, dist, seat, opts in game.reactors],
-            "rob": None if game.rob is None else [game.rob[0], tile_id(game.rob[1])],
+            "rob": None if game.rob is None else [game.rob[0], tile_id(game.rob[1]), game.rob_kind],
             "result": game.result,
             "ting": {str(s): bool(v) for s, v in game.ting.items()},
             "drawn": None if game.drawn is None else tile_id(game.drawn),
@@ -78,6 +78,7 @@ def restore(data: dict) -> tuple[Game, dict]:
                      for r, d, s, opts in (gs.get("reactors") or [])]
     rob = gs.get("rob")
     game.rob = None if rob is None else (int(rob[0]), parse_tile(rob[1]))
+    game.rob_kind = None if not rob else (str(rob[2]) if len(rob) > 2 else "added")
     game.result = gs.get("result")
     ting = gs.get("ting") or {}
     game.ting = {s: bool(ting.get(str(s), False)) for s in range(game.cfg.seats)}

@@ -82,7 +82,7 @@ TOOLS: list[dict] = [
     _tool("discard", "打出一张手里的牌，tile 写牌名（如 m3 / p5 / s7 / z5）",
           {"tile": {"type": "string"}}, ["tile"]),
     _tool("pon", "碰别人打出的这张牌，tile 就写这张牌", {"tile": {"type": "string"}}, ["tile"]),
-    _tool("kan", "杠这张牌", {"tile": {"type": "string"}}, ["tile"]),
+    _tool("kan", "杠这张牌：手里四张亮出来杠，或把已有的碰加成杠", {"tile": {"type": "string"}}, ["tile"]),
     _tool("chi", "吃出顺子，给出你手里要用的两张，写成 一张+一张（如 s4+s6）",
           {"combo": {"type": "string"}}, ["combo"]),
     _tool("win", "宣布胡牌", {}, []),
@@ -171,7 +171,8 @@ class Game:
         self.history: list[Event] = []  # 全程事件（复盘、日志用）
         self.last: tuple[int, str, int] | None = None
         self.reactors: list[tuple[int, int, int, list[Action]]] = []   # (rank, dist, seat, options)
-        self.rob: tuple[int, int] | None = None                        # (加杠者, 那张牌)
+        self.rob: tuple[int, int] | None = None                        # (杠的人, 那张牌)
+        self.rob_kind: str | None = None                               # 哪种杠被抢：in_hand / added
         self.result: dict | None = None
         self.ting: dict[int, bool] = {s: False for s in range(config.seats)}   # 谁报听了
         self.drawn: int | None = None                                        # 刚摸进来的那张
@@ -306,31 +307,37 @@ class Game:
     def _do_kan(self, seat: int, action: Action) -> None:
         tile = action.tile
         kind = (action.meta or {}).get("kind")
-        if kind == "closed":
-            self._hand_sub(seat, tile, 4)
-            self.fixed[seat].append(Meld("kan", (tile,) * 4))
-            self._emit(Event("kan", seat, tile, {"kind": "closed"}))
-            self.phase = "kan_draw"
-            self.last = None
+        if kind == "in_hand":
+            # 手里四张亮出来杠，别人能抢；明杠（别人打牌后杠的）不能抢
+            if self.cfg.allow_rob_kan and self._robbers(seat, tile):
+                self.rob, self.rob_kind = (seat, tile), "in_hand"
+                self._build_robbers(seat, tile)
+                return
+            self._finish_kan(seat, tile, "in_hand")
             return
         if kind == "added":
             if self.cfg.allow_rob_kan and self._robbers(seat, tile):
-                self.rob = (seat, tile)
+                self.rob, self.rob_kind = (seat, tile), "added"
                 self._build_robbers(seat, tile)
                 return
-            self._finish_added_kan(seat, tile)
+            self._finish_kan(seat, tile, "added")
             return
         raise RuntimeError(f"自己回合不能明杠（{kind}）")
 
-    def _finish_added_kan(self, seat: int, tile: int) -> None:
-        self._hand_sub(seat, tile, 1)
-        for i, m in enumerate(self.fixed[seat]):
-            if m.is_triplet_like and m.kind == "triplet" and m.tiles[0] == tile:
-                self.fixed[seat][i] = Meld("kan", (tile,) * 4)
-                break
+    def _finish_kan(self, seat: int, tile: int, kind: str) -> None:
+        if kind == "in_hand":
+            self._hand_sub(seat, tile, 4)
+            self.fixed[seat].append(Meld("kan", (tile,) * 4))
+            self._emit(Event("kan", seat, tile, {"kind": "in_hand"}))
         else:
-            raise RuntimeError("加杠找不到原来的碰")
-        self._emit(Event("kan", seat, tile, {"kind": "added"}))
+            self._hand_sub(seat, tile, 1)
+            for i, m in enumerate(self.fixed[seat]):
+                if m.is_triplet_like and m.kind == "triplet" and m.tiles[0] == tile:
+                    self.fixed[seat][i] = Meld("kan", (tile,) * 4)
+                    break
+            else:
+                raise RuntimeError("加杠找不到原来的碰")
+            self._emit(Event("kan", seat, tile, {"kind": "added"}))
         self.phase = "kan_draw"
         self.last = None
 
@@ -359,8 +366,9 @@ class Game:
             if not self.reactors:
                 if self.rob:
                     owner, tile = self.rob
-                    self.rob = None
-                    self._finish_added_kan(owner, tile)
+                    kind = self.rob_kind
+                    self.rob, self.rob_kind = None, None
+                    self._finish_kan(owner, tile, kind)
                 else:
                     self.turn = (self.last[0] + 1) % self.cfg.seats
                     self.phase = "draw"
@@ -627,7 +635,7 @@ def _selftest() -> int:
     case("碰压过吃", (g.pending().seat, g.pending().kind), (2, "react"))
     case("碰的选项里有碰", any(a.kind == "pon" for a in g.pending().legal), True)
 
-    # 4 杠后从牌头补一张（这局不许暗杠，用加杠验同一条路径）
+    # 4 杠后从牌头补一张（用加杠验同一条路径）
     g = Game(GameConfig(seats=3, seed=2))
     g.start()
     g.hands[0] = [0] * KINDS
@@ -639,7 +647,8 @@ def _selftest() -> int:
     before_wall = len(g.wall)
     before_head = g.wall[0]
     d = g.pending()
-    case("暗杠不在选项里", any(a.kind == "kan" and (a.meta or {}).get("kind") == "closed" for a in d.legal), False)
+    case("没有暗杠这回事，只有手里四张的明杠",
+         any(a.kind == "kan" and (a.meta or {}).get("kind") == "closed" for a in d.legal), False)
     kan = next(a for a in d.legal if a.kind == "kan" and a.tile == tile)
     g.apply(kan)
     case("加杠后进入补张", g.phase, "kan_draw")
@@ -680,6 +689,45 @@ def _selftest() -> int:
     g.apply(next(a for a in d.legal if a.kind == "win"))
     case("抢杠胡成立", (g.result["type"], g.result["seat"], g.result["rob"]), ("win", 1, True))
     case("没报听的人抢不了杠", rob_setup(listen=False).phase, "kan_draw")
+
+    # 6b 手里四张直接亮出来杠，别人能抢
+    g = Game(GameConfig(seed=12))
+    g.start()
+    for s in range(4):
+        g.hands[s] = [0] * KINDS
+        g.fixed[s] = []
+        g.discards[s] = []
+    p7 = parse_tile("7饼")
+    g.hands[0] = _h("7饼 7饼 7饼 7饼 2条 3条 4条 1饼 2饼 3饼 9条 9条 9条 4饼")
+    g.hands[1] = _h("1万 2万 3万 4万 5万 6万 5条 5条 5条 9饼 9饼 8饼 9饼")
+    g.ting = {0: True, 1: True, 2: False, 3: False}
+    g.wall.extend([parse_tile("1万")] * 20)
+    g.turn, g.phase, g.last, g.drawn = 0, "discard", None, p7
+    d = g.pending()
+    case("手里四张是明杠", any(a.kind == "kan" and (a.meta or {}).get("kind") == "in_hand" and a.tile == p7
+                        for a in d.legal), True)
+    g.apply(next(a for a in d.legal if a.kind == "kan" and a.tile == p7))
+    d = g.pending()
+    case("明杠也有人抢", (d.seat, d.kind), (1, "react"))
+    g.apply(next(a for a in d.legal if a.kind == "win"))
+    case("抢的是手里四张的杠", g.result["rob"], True)
+    case("抢杠之后杠没算成", sum(1 for m in g.fixed[0] if m.kind == "kan"), 0)
+
+    # 6c 别人打牌后杠的那种，抢不了
+    g = Game(GameConfig(seed=13))
+    g.start()
+    for s in range(4):
+        g.hands[s] = [0] * KINDS
+        g.fixed[s] = []
+        g.discards[s] = []
+    g.hands[0] = _h("7饼 7饼 7饼 2条 3条 4条 1饼 2饼 3饼 9条 9条 9条 4饼")
+    g.ting = {0: False, 1: True, 2: False, 3: False}
+    g.discards[2] = [p7]
+    g.turn, g.phase, g.last = 2, "react", (2, "discard", p7)
+    g.rob = None
+    g.reactors = [(1, 1, 0, [Action("kan", tile=p7, meta={"kind": "open", "from": 2})])]
+    g.apply(Action("kan", tile=p7, meta={"kind": "open", "from": 2}))
+    case("别人打的牌杠出来没人抢", g.phase, "kan_draw")
 
     # 5 荒庄：牌墙摸空
     g = Game(GameConfig(seats=3, seed=3))

@@ -188,7 +188,7 @@ class RuleConfig:
     allow_chi: bool = True
     allow_pon: bool = True
     allow_kan: bool = True
-    allow_closed_kan: bool = False      # 这局不许暗杠；明杠、加杠照旧
+    allow_kan_in_hand: bool = True      # 手里四张直接明杠（亮出来，可被抢）
 
     # 以后补规则的容器，避免为了加个开关去改 dataclass
     extra: dict = field(default_factory=dict)
@@ -469,8 +469,8 @@ class Referee:
                         out.append(Action("discard", tile=t))
             if self.cfg.allow_kan:
                 for t in range(KINDS):
-                    if self.cfg.allow_closed_kan and counts[t] >= 4:
-                        out.append(Action("kan", tile=t, meta={"kind": "closed"}))
+                    if self.cfg.allow_kan_in_hand and counts[t] >= 4:
+                        out.append(Action("kan", tile=t, meta={"kind": "in_hand"}))
                     elif counts[t] >= 1 and any(m.is_triplet_like and m.tiles[0] == t for m in fixed):
                         out.append(Action("kan", tile=t, meta={"kind": "added"}))
             return out
@@ -518,18 +518,18 @@ class Referee:
             kind = (action.meta or {}).get("kind")
             if action.tile is None:
                 return Result(False, "NO_TILE", "没说杠哪张")
-            if kind == "closed":
-                if not self.cfg.allow_closed_kan:
-                    return Result(False, "KAN_CLOSED", "这局不许暗杠")
+            if kind == "in_hand":
+                if not self.cfg.allow_kan_in_hand:
+                    return Result(False, "KAN_IN_HAND", "这局不许手里四张直接杠")
                 if counts[action.tile] < 4:
-                    return Result(False, "NOT_ENOUGH", f"暗杠要手里四张{tile_name(action.tile)}")
+                    return Result(False, "NOT_ENOUGH", f"手里四张{tile_name(action.tile)}才能这么杠")
                 return Result(True, "OK")
             if kind == "added":
                 has_pong = any(m.kind == "triplet" and m.tiles[0] == action.tile for m in fixed)
                 if counts[action.tile] < 1 or not has_pong:
                     return Result(False, "NO_PONG", "加杠要先有这组碰，且手里还有一张")
                 return Result(True, "OK")
-            return Result(False, "KAN_KIND", f"自己回合只能暗杠或加杠，收到 {kind}")
+            return Result(False, "KAN_KIND", f"自己回合只能手里四张杠或加杠，收到 {kind}")
         if action.kind in ("pon", "kan", "chi"):
             if view.ting.get(seat) and action.kind in ("pon", "chi"):
                 return Result(False, "TING_LOCKED", "报听之后不能碰、不能吃")

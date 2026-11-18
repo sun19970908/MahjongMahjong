@@ -184,12 +184,14 @@ def apply_and_note(game: Game, act: Action, log: list[str], me: int) -> None:
         elif t == "chi":
             log.append(f"{SEAT[e.seat]} 吃 " + "+".join(face(x)[0].strip() for x in e.data["use"]))
         elif t == "kan":
-            log.append(f"{SEAT[e.seat]} 杠 {name}")
+            label = {"in_hand": "明杠", "added": "加杠"}.get((e.data or {}).get("kind"), "杠")
+            log.append(f"{SEAT[e.seat]} {label} {name}")
         elif t == "ting":
             waits = "、".join(face(t)[0].strip() for t in (e.data or {}).get("waits", []))
             log.append(f"{SEAT[e.seat]} 报听" + (f"（等 {waits}）" if waits else ""))
         elif t == "win":
-            log.append(f"*** {SEAT[e.seat]} 胡了！")
+            tag = "抢杠" if (e.data or {}).get("rob") else ""
+            log.append(f"*** {SEAT[e.seat]} {tag}胡了！")
         elif t == "draw_game":
             log.append("*** 荒庄：牌墙摸空")
     del log[:-6]
