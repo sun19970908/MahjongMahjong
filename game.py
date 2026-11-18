@@ -86,7 +86,7 @@ TOOLS: list[dict] = [
     _tool("chi", "吃出顺子，给出你手里要用的两张，写成 一张+一张（如 s4+s6）",
           {"combo": {"type": "string"}}, ["combo"]),
     _tool("win", "宣布胡牌", {}, []),
-    _tool("bloom", "后开花：轮到你摸牌时不摸了，直接胡牌墙最后一张（手里得有杠，不用报听）", {}, []),
+    _tool("bloom", "后开花：杠完补张那一下，牌墙最后一张正好能胡，就取它胡，不来牌头补", {}, []),
     _tool("pass", "过，不要这张牌", {}, []),
     _tool("ting", "报听。手牌已经听牌、想锁死手牌等胡，就调它", {}, []),
     NOTE_TOOL,
@@ -197,10 +197,7 @@ class Game:
         if self.phase == "ended":
             return None
         if self.phase == "draw":
-            opts = [Action("draw")]
-            if self._can_bloom(self.turn):
-                opts.append(Action("bloom"))
-            return self._decision(self.turn, "draw", opts)
+            return self._decision(self.turn, "draw", [Action("draw")])
         if self.phase == "discard":
             legal = self.r.legal_actions(self._view(self.turn), self.turn)
             return self._decision(self.turn, "discard", legal)
@@ -210,6 +207,7 @@ class Game:
             rank, dist, seat, options = self.reactors[0]
             return self._decision(seat, "react", options + [Action("pass")])
         if self.phase == "kan_draw":
+            # 后开花只在这一下判定：杠完补张，牌墙最后一张正好能胡就取它
             opts = [Action("draw")]
             if self._can_bloom(self.turn):
                 opts.append(Action("bloom"))
@@ -675,7 +673,7 @@ def _selftest() -> int:
     case("碰压过吃", (g.pending().seat, g.pending().kind), (2, "react"))
     case("碰的选项里有碰", any(a.kind == "pon" for a in g.pending().legal), True)
 
-    # 7 后开花：手里有杠，牌墙最后一张正好能把牌型补成胡
+    # 7 后开花：杠完补张那一下，牌墙最后一张正好能把牌型补成胡
     g = Game(GameConfig(seed=14))
     g.start()
     for s in range(4):
@@ -686,14 +684,14 @@ def _selftest() -> int:
     g.fixed[0] = [Meld("kan", (p4, p4, p4, p4))]
     g.hands[0] = _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼")
     g.wall = deque([parse_tile("1万")] * 5 + [p9])
-    g.turn, g.phase, g.last, g.drawn = 0, "draw", None, None
+    g.turn, g.phase, g.last, g.drawn = 0, "kan_draw", None, None
     d = g.pending()
-    case("有杠就能后开花", [a.kind for a in d.legal], ["draw", "bloom"])
+    case("杠完就能后开花", [a.kind for a in d.legal], ["draw", "bloom"])
     ev = g.apply(Action("bloom"))
     case("后开花就是胡", (g.result["type"], g.result["seat"], g.result["bloom"]), ("win", 0, True))
     case("取走的是牌墙最后一张", (ev[0].tile, len(g.wall)), (p9, 5))
 
-    g = Game(GameConfig(seed=16))
+    g = Game(GameConfig(seed=18))
     g.start()
     for s in range(4):
         g.hands[s] = [0] * KINDS
@@ -703,8 +701,19 @@ def _selftest() -> int:
     g.hands[0] = _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼")
     g.wall = deque([parse_tile("1万")] * 5 + [p9])
     g.turn, g.phase, g.last, g.drawn = 0, "draw", None, None
-    g.apply(Action("draw"))
-    case("先摸了牌就不能后开花", [a.kind for a in g.pending().legal].count("bloom"), 0)
+    case("普通摸牌那一下不后开花", [a.kind for a in g.pending().legal], ["draw"])
+
+    g = Game(GameConfig(seed=16))
+    g.start()
+    for s in range(4):
+        g.hands[s] = [0] * KINDS
+        g.fixed[s] = []
+        g.discards[s] = []
+    g.fixed[0] = [Meld("kan", (p4, p4, p4, p4))]
+    g.hands[0] = _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼")
+    g.wall = deque([parse_tile("1万")] * 5 + [parse_tile("4饼")])
+    g.turn, g.phase, g.last, g.drawn = 0, "kan_draw", None, None
+    case("杠完但尾张补不成胡，也不能开花", [a.kind for a in g.pending().legal], ["draw"])
 
     g = Game(GameConfig(seed=15))
     g.start()
@@ -714,7 +723,7 @@ def _selftest() -> int:
         g.discards[s] = []
     g.hands[0] = _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼 9饼 1饼")
     g.wall = deque([parse_tile("1万")] * 5 + [p9])
-    g.turn, g.phase, g.last, g.drawn = 0, "draw", None, None
+    g.turn, g.phase, g.last, g.drawn = 0, "kan_draw", None, None
     case("手里没杠不能后开花", [a.kind for a in g.pending().legal], ["draw"])
 
     # 4 杠后从牌头补一张（用加杠验同一条路径）
