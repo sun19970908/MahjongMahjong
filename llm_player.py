@@ -36,6 +36,9 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_NOTES = HERE / "牌友笔记.md"
 DEFAULT_LOG = HERE / "llm_log.jsonl"
 
+# 旧存档里写进历史的占位话：模型会把它当成自己上一句台词照着念，一句都别再摆上桌
+_FILLERS = frozenset({"（闲下来想这手牌，还没想完）", "（闲下来想这手牌,还没想完）"})
+
 
 # ---------------------------------------------------------------- HTTP
 
@@ -291,6 +294,7 @@ class LLMPlayer:
         self._pause_calls = 0                # 这一回合它喊了几次暂停
         self.on_progress: Callable | None = None   # 流式心跳钩子：(kind, 想字, 说字)
         self._tick_at = 0.0
+        self._last_say = ""                  # 上一手说出口的那句：同一句再说一遍就是复读
 
         self.messages: list[dict] = [{"role": "system", "content": self._system_prompt()}]
         self.records: list[TurnRecord] = []
@@ -504,6 +508,15 @@ class LLMPlayer:
             else:
                 action, source = self._pick_fallback(d.legal), "fallback"
                 used_fallback = True
+
+        # 复读闸：和上一手一模一样的话不再摆到牌桌上（牌桌本来就有动作记录）
+        said = speech.strip()
+        if said in _FILLERS:                  # 老存档里留下的占位话，一句都别再念
+            said, speech = "", ""
+        if said and said == self._last_say:
+            speech = ""
+        if said:
+            self._last_say = said
 
         rec = TurnRecord(len(self.records), speech, action, used_fallback, source=source,
                          reasoning=r1.reasoning, seconds=r1.seconds, tokens=r1.tokens,
@@ -760,9 +773,12 @@ class LLMPlayer:
                 # 「assistant → user」的错序，模型和缓存都别扭。
                 if plan or leftover:
                     self.messages.append({"role": "user", "content": prompt})
+                    # 结论留在 content，半截思路留在 reasoning_content。
+                    # 空想没结论时 content 留空——早先这里塞了句「（还没想完）」的占位话，
+                    # 模型拿它当自己上一句台词，下一手照着念，牌桌上就整排复读。
                     self.messages.append({"role": "assistant",
-                                          "content": plan.strip() or "（闲下来想这手牌，还没想完）",
-                                          "reasoning_content": leftover})
+                                          "content": plan.strip(),
+                                          **({"reasoning_content": leftover} if leftover else {})})
             return plan
         finally:
             with self._lock:
