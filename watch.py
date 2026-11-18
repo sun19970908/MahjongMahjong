@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -141,6 +142,8 @@ def main() -> int:
     ap.add_argument("--brain", choices=["fast", "model"], default="model",
                     help="model=模型脑（默认）；fast=不到 0.1 秒的脚本脑")
     ap.add_argument("--model", default="strata-lowthink")
+    ap.add_argument("--timeout", type=float, default=40,
+                    help="模型想这么久还没完，就让快脑顶上这一手")
     ap.add_argument("--budget-react", type=int, default=500)
     ap.add_argument("--budget-discard", type=int, default=1200)
     ap.add_argument("--dry", action="store_true")
@@ -173,11 +176,33 @@ def main() -> int:
         done = int(req["round"])
         t0 = time.monotonic()
         legal = [a for a in (as_action(x) for x in req.get("legal") or []) if a]
-        try:
-            act, say = ask(impl, req)
-        except Exception as exc:                       # 脑子抽风也不能把牌桌卡死
-            act, say = None, ""
-            note(f"这一手脑子出错：{type(exc).__name__} {exc}")
+        act, say = None, ""
+        if impl is None:
+            try:
+                act, say = fast(req, legal)
+            except Exception as exc:
+                note(f"这一手快脑出错：{type(exc).__name__} {exc}")
+        else:
+            # 模型在另一条线里想，想太久就先用快脑顶上，牌桌不许停在那儿
+            out: dict = {}
+
+            def think() -> None:
+                try:
+                    out["r"] = ask(impl, req)
+                except Exception as exc:               # 脑子抽风也不能把牌桌卡死
+                    out["e"] = exc
+
+            worker = threading.Thread(target=think, daemon=True)
+            worker.start()
+            worker.join(args.timeout)
+            if "r" in out:
+                act, say = out["r"]
+            elif "e" in out:
+                note(f"这一手模型出错：{type(out['e']).__name__} {out['e']}")
+                act, say = fast(req, legal)
+            else:
+                note(f"模型 {args.timeout:.0f}s 没想完，先让快脑顶上")
+                act, say = fast(req, legal)
         if act is None or not allowed(act, legal):
             if act is not None:
                 note(f"报的 {act.kind} 不在这一手的选项里，按规矩挑一个")
