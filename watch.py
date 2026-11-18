@@ -1,7 +1,8 @@
 """2 号的手：牌局一停就自己出，不用叫。
 
-    python watch.py --seat 2              # 默认快脑，一手不到 0.1 秒
-    python watch.py --seat 2 --brain model # 换成模型想（会慢十几秒）
+    python watch.py --seat 2              # 默认模型脑（本地 strata）
+    python watch.py --seat 2 --brain fast  # 脚本脑，一手不到 0.1 秒
+    python watch.py --seat 2 --brain mine  # 等我（对话里的人）亲自落子，等不到就快脑保底
     python watch.py --seat 2 --dry        # 只打印打算怎么打，不落子
 
 盯 seat2/pending.json，看到新的一手就自己想、自己写 answer.json。
@@ -121,7 +122,7 @@ def fallback(legal: list[Action]) -> Action | None:
 
 
 def allowed(act: Action, legal: list[Action]) -> bool:
-    """模型给的动作必须在 legal 里，不然引擎会判非法、牌桌直接崩。"""
+    """报的动作必须在 legal 里，不然引擎会判非法、牌桌直接崩。"""
     for a in legal:
         if a.kind != act.kind:
             continue
@@ -135,12 +136,32 @@ def allowed(act: Action, legal: list[Action]) -> bool:
     return False
 
 
+def brief(act: Action | None) -> str:
+    if act is None:
+        return "-"
+    d = act.to_dict()
+    return f"{act.kind} {d.get('tile') or d.get('combo') or ''}".strip()
+
+
+def settle(seat: int, round_no: int, limit: float) -> bool:
+    """等别人（我）替这一手落子。pending 消失或换了 round 就是接下了。"""
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < limit:
+        req = seat_io.pending(seat)
+        if not req or int(req.get("round") or -1) != round_no:
+            return True
+        time.sleep(0.2)
+    return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seat", type=int, default=2)
     ap.add_argument("--interval", type=float, default=0.1)
-    ap.add_argument("--brain", choices=["fast", "model"], default="model",
-                    help="model=模型脑（默认）；fast=不到 0.1 秒的脚本脑")
+    ap.add_argument("--brain", choices=["fast", "model", "mine"], default="model",
+                    help="model=模型脑（默认）；fast=脚本脑；mine=等我落子，等不到就快脑保底")
+    ap.add_argument("--hold", type=float, default=30,
+                    help="mine 模式下等我一手的秒数，超了快脑顶上，牌桌不许停")
     ap.add_argument("--model", default="strata-lowthink")
     ap.add_argument("--timeout", type=float, default=40,
                     help="模型想这么久还没完，就让快脑顶上这一手")
@@ -184,7 +205,15 @@ def main() -> int:
         t0 = time.monotonic()
         legal = [a for a in (as_action(x) for x in req.get("legal") or []) if a]
         act, say = None, ""
-        if impl is None:
+        if args.brain == "mine":
+            act, say = fast(req, legal)                 # 先把保底的那手算好
+            note(f"第 {done} 手 {req.get('kind')} 等你 ≤{args.hold:.0f}s，保底 {brief(act)}")
+            if settle(args.seat, done, args.hold):      # 我接了，就不重复落子
+                note(f"第 {done} 手 你接了")
+                continue
+            note(f"第 {done} 手 没等到你，保底顶上")
+            say = "（保底）"
+        elif impl is None:
             try:
                 act, say = fast(req, legal)
             except Exception as exc:
