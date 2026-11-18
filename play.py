@@ -105,7 +105,8 @@ def screen(game: Game, me: int, buddy: int, status: str, log: list[str],
         out.append(" " * 6 + block[1])
         out.append(" " * 6 + block[2])
     if say:
-        out.append(" " + paint(say, DIM))
+        for line in say.splitlines():          # 每家的最后一句话都摆出来，空的多行也照走
+            out.append(" " + paint(line, DIM))
     out.append(RULE)
 
     order = [i for i in range(game.cfg.seats) if i != me] + [me]
@@ -293,8 +294,10 @@ def main() -> int:
 
     if saved:
         log: list[str] = list(meta.get("log") or [])
-        say = str(meta.get("say") or "")
-        say_by = int(meta.get("say_by") if meta.get("say_by") is not None else -1)
+        said = {int(k): str(v) for k, v in (meta.get("said") or {}).items() if str(v).strip()}
+        legacy = str(meta.get("say") or "")
+        if legacy and meta.get("say_by") is not None:       # 老存档只有一句，接进来
+            said.setdefault(int(meta["say_by"]), legacy)
         steps = int(meta.get("steps") or 0)
         if llm and meta.get("llm"):
             llm.impl.messages = list(meta["llm"].get("messages") or llm.impl.messages)
@@ -304,23 +307,19 @@ def main() -> int:
         game = Game(GameConfig(seats=4, seed=args.seed))
         game.start()
         log = []
-        say = ""
-        say_by = -1
+        said: dict[int, str] = {}
         steps = 0
 
     def said_text() -> str:
-        """台词标的是说这话的那个人，不是此刻轮到的这个人。"""
-        if not say:
-            return ""
-        who = names.get(say_by, "")
-        return f"{who}：{say}" if who else say
+        """每家的最后一句话都留着，标的是说这话的那个人，不是此刻轮到的这个人。"""
+        return "\n".join(f"{names.get(s, '')}：{t}" for s, t in sorted(said.items()) if t.strip())
 
     def persist() -> None:
         if args.no_save:
             return
         state.save(STATE_PATH, game, {
             "you": me, "buddy": buddy, "agent": agent,
-            "steps": steps, "say": say, "say_by": say_by, "log": log[-30:], "phase": game.phase,
+            "steps": steps, "said": said, "log": log[-30:], "phase": game.phase,
             "llm": None if not llm else {"messages": llm.impl.messages,
                                          "pause_calls": llm.impl._pause_calls},
         })
@@ -355,9 +354,11 @@ def main() -> int:
         t0 = time.time()
         act, speech = p.decide(d)
         took = time.time() - t0
+        if speech.strip():
+            said[d.seat] = speech.strip()      # 每家留着自己最后那句话，别人再打牌也不冲掉
 
         if act is None:                       # 有人要求中场暂停：这一手先不打
-            draw_screen(screen(game, me, buddy, "牌先停着", log, say=f"{p.name}：{speech}", names=names))
+            draw_screen(screen(game, me, buddy, "牌先停着", log, say=said_text(), names=names))
             opener = speech
             actor = p.name
             if p.supports == "human" and talker:   # 我按的暂停：让牌友先说一句
@@ -366,8 +367,6 @@ def main() -> int:
             pause_talk(talker, buddy, opener, actor)
             continue
 
-        say = speech
-        say_by = d.seat
         log.append(f"{SEAT[d.seat]} 出手 {paint(f'[{took:.1f}s]', DIM)}")
         if tracer:
             row = {"seat": d.seat, "name": p.name, "decision": d.kind, "action": act.to_dict(),
