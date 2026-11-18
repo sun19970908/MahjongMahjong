@@ -87,6 +87,7 @@ TOOLS: list[dict] = [
           {"combo": {"type": "string"}}, ["combo"]),
     _tool("win", "宣布胡牌", {}, []),
     _tool("pass", "过，不要这张牌", {}, []),
+    _tool("ting", "报听。手牌已经听牌、想锁死手牌等胡，就调它", {}, []),
     NOTE_TOOL,
     PAUSE_TOOL,
 ]
@@ -172,6 +173,8 @@ class Game:
         self.reactors: list[tuple[int, int, int, list[Action]]] = []   # (rank, dist, seat, options)
         self.rob: tuple[int, int] | None = None                        # (加杠者, 那张牌)
         self.result: dict | None = None
+        self.ting: dict[int, bool] = {s: False for s in range(config.seats)}   # 谁报听了
+        self.drawn: int | None = None                                        # 刚摸进来的那张
 
     # ---------- 开局 ----------
     def start(self) -> list[Event]:
@@ -203,6 +206,8 @@ class Game:
             return self._decision(seat, "react", options + [Action("pass")])
         if self.phase == "kan_draw":
             return self._decision(self.turn, "draw", [Action("draw")])
+        if self.phase == "ting_declare":
+            return self._decision(self.turn, "ting_declare", [Action("ting"), Action("pass")])
         raise RuntimeError(f"未知阶段 {self.phase}")
 
     def _decision(self, seat: int, kind: str, legal: list[Action]) -> Decision:
@@ -230,6 +235,9 @@ class Game:
 
         if d.kind == "react":
             return self._do_reaction(seat, action)
+
+        if d.kind == "ting_declare":
+            return self._do_ting_declare(seat, action)
 
         raise RuntimeError(f"{d.kind} 阶段不接受动作 {action.kind}")
 
@@ -265,8 +273,13 @@ class Game:
             self._hand_sub(seat, action.tile, 1)
             self.discards[seat].append(action.tile)
             self.last = (seat, "discard", action.tile)
+            self.drawn = None
             self._emit(Event("discard", seat, action.tile, {"left": sum(self.hands[seat])}))
-            self._build_reactors(seat, action.tile)
+            if not self.ting[seat] and self._ready(seat):
+                # 报听是主动的：刚好听牌了才问一句，不想报可以直接过
+                self.phase = "ting_declare"
+            else:
+                self._build_reactors(seat, action.tile)
             return self.drain_events()
 
         if action.kind == "kan":
@@ -274,6 +287,21 @@ class Game:
             return self.drain_events()
 
         raise RuntimeError(f"自己回合不接受 {action.kind}")
+
+    def _ready(self, seat: int) -> bool:
+        """手里 13 张（或减掉副露后对应的张数）听没听牌。"""
+        return bool(self.r.waits(self.hands[seat], self.fixed[seat]))
+
+    def _do_ting_declare(self, seat: int, action: Action) -> list[Event]:
+        if action.kind not in ("ting", "pass"):
+            raise RuntimeError(f"报听阶段只接受 ting / pass，收到 {action.kind}")
+        if action.kind == "ting":
+            self.ting[seat] = True
+            waits = [tile_id(t) for t in self.r.waits(self.hands[seat], self.fixed[seat])]
+            self._emit(Event("ting", seat, data={"waits": waits}))
+        # 报完（或不报）再让下家反应 / 摸牌
+        self._build_reactors(self.last[0], self.last[2])
+        return self.drain_events()
 
     def _do_kan(self, seat: int, action: Action) -> None:
         tile = action.tile
@@ -390,6 +418,8 @@ class Game:
         for s in range(self.cfg.seats):
             if s == owner:
                 continue
+            if not self.ting[s]:
+                continue
             v = HandView(seat=s, seats=self.cfg.seats, hands={s: tuple(self.hands[s])},
                          fixed={s: tuple(self.fixed[s])}, last=(owner, "discard", tile))
             c = list(self.hands[s]); c[tile] += 1
@@ -411,6 +441,7 @@ class Game:
             return
         tile = self.wall.popleft()
         self.hands[seat][tile] += 1
+        self.drawn = tile
         self._emit(Event("kan_draw" if kan else "draw", seat, tile, {"wall": len(self.wall)}))
         self.phase = "discard"
         self.last = None
@@ -457,6 +488,8 @@ class Game:
             "wall_last": tile_id(self.wall[-1]) if self.wall else None,   # 最后一张是明牌，谁都能看
             "last": None if self.last is None else {"seat": self.last[0], "tile": tile_id(self.last[2])},
             "can_win": self.r.is_win(tuple(self.hands[seat]), tuple(self.fixed[seat])).ok if self.phase == "discard" and self.turn == seat else False,
+            "ting": {s: self.ting[s] for s in range(self.cfg.seats)},
+            "drawn": tile_id(self.drawn) if self.drawn is not None and seat == self.turn else None,
             "pending": None if d is None else {"seat": d.seat, "kind": d.kind},
             "result": self.result,
         }
@@ -476,6 +509,8 @@ class Game:
             discards={s: tuple(self.discards[s]) for s in range(self.cfg.seats)},
             wall_left=len(self.wall),
             last=self.last if last is None else last,
+            ting=dict(self.ting),
+            drawn=self.drawn if (self.drawn is not None and seat == self.turn) else None,
         )
 
     # ---------- 杂务 ----------
@@ -511,6 +546,8 @@ def random_policy(rng: random.Random | None = None) -> Callable[[Decision], Acti
         kinds = {a.kind for a in d.legal}
         if "win" in kinds:
             return next(a for a in d.legal if a.kind == "win")
+        if "ting" in kinds:          # 听牌就报，不报永远胡不了
+            return next(a for a in d.legal if a.kind == "ting")
         for k, p in (("kan", 0.9), ("pon", 0.5), ("chi", 0.3)):
             if k in kinds and rng.random() < p:
                 return rng.choice([a for a in d.legal if a.kind == k])

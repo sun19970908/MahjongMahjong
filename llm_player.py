@@ -245,6 +245,7 @@ class LLMPlayer:
         self.client = client
         self.seat = seat
         self.notes_path = Path(notes_path)
+        self.rules_path = HERE / "规则.txt"
         # 临时笔记：只这一局用，随牌桌一起贴在每手的 user 消息里（在尾巴上，不毁前缀）
         self.temp_notes_path = (Path(soft_notes_path) if soft_notes_path
                                 else HERE / "临时笔记.md")
@@ -272,16 +273,21 @@ class LLMPlayer:
         self._lock = threading.Lock()
 
     # ---- prompt 拼装 ----
+    def _read_rules(self) -> str:
+        """规则原文直接读 规则.txt：以前这里是硬拷贝一份，改规则就得改两处。"""
+        try:
+            return self.rules_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return "每个人13张牌；无风牌 无发白 有红中。"
+
     def _system_prompt(self) -> str:
         head = (
             "你是「豆包工作」，一桌麻将里的牌友。四个玩家，另外两人随机出牌。\n"
             "说话像牌友，记账像会计。你说的话会直接显示在牌桌上。\n"
             "规则（原文，以此为准）：\n"
-            "手里13张牌；无风牌 无发白 有红中；\n"
-            "胡牌条件：手里有且仅有一个对子 / 必须有刻子（双红中可以充当刻子）/ "
-            "必须有幺九（红中可以充当幺九）/ 万饼条必须都有 / "
-            "不能有两张或以上胡牌（飘胡除外）；\n"
-            "飘胡：手里只有刻子或对子。\n"
+            f"{self._read_rules()}\n"
+            "报听要主动调 ting：手牌听牌之后报听，报听后手牌锁死——只能把刚摸进来的那张打回去，"
+            "可以杠，不能碰不能吃；没报听不能胡。\n"
             "出牌必须调用工具，不许只用文字回答；牌用 m1..m9 / p1..p9 / s1..s9 / z5 表示。"
         )
         # 笔记只在这里插一次：system 是整段对话的开头，每一手都省下一千多字的重复
@@ -345,11 +351,13 @@ class LLMPlayer:
         return "、".join(lines)
 
     def _budget_for(self, d: Decision) -> int:
-        """吃叉只是判断接不接，1000 够；打牌要摊四组面子，给 3000。"""
-        return self.budget_react if d.kind == "react" else self.budget_discard
+        """吃叉、报不报听只是判断接不接，1000 够；打牌要摊四组面子，给 3000。"""
+        return self.budget_react if d.kind in ("react", "ting_declare") else self.budget_discard
 
     def _headline(self, d: Decision) -> str:
         """一句话说清现在是什么时刻，别让它自己猜。"""
+        if d.kind == "ting_declare":
+            return "【手牌听牌了，报不报？】"
         if any(a.kind == "win" for a in d.legal):
             return "【能胡了】"
         if d.kind == "react":
@@ -524,12 +532,17 @@ class LLMPlayer:
             return Action("win")
         if name == "pass":
             return Action("pass")
+        if name == "ting":
+            return Action("ting")
         raise ValueError(f"不认识的动作 {name}")
 
     @staticmethod
     def _pick_fallback(legal: Sequence[Action]) -> Action:
         for a in legal:
             if a.kind == "draw":
+                return a
+        for a in legal:               # 报听阶段兜底也报：不报等于自断胡路
+            if a.kind == "ting":
                 return a
         for a in legal:
             if a.kind == "pass":
@@ -960,7 +973,7 @@ def _selftest() -> int:
     case("打牌和吃叉用的是同一张工具表", shape(d) == shape(pon_only), True)
     case("能胡和不能胡也是同一张", shape(win_only) == shape(d), True)
     case("工具表带齐整套动作", [t["function"]["name"] for t in d.tools()],
-         ["discard", "pon", "kan", "chi", "win", "pass", "edit_note", "pause"])
+         ["discard", "pon", "kan", "chi", "win", "pass", "ting", "edit_note", "pause"])
     case("打牌那几件 schema 里不塞牌名",
          any("enum" in json.dumps(t) for t in d.tools()[:6]), False)
 
@@ -970,7 +983,7 @@ def _selftest() -> int:
     pC = LLMPlayer(fcC, 0, log_path=None)
     reply1 = pC.chat("我刚才打得怎么样")
     case("第一句带开场说明", "【散场闲聊】" in fcC.calls[0]["messages"][-1]["content"], True)
-    case("闲聊也带整张工具表", len(fcC.calls[0]["tools"]), 8)
+    case("闲聊也带整张工具表", len(fcC.calls[0]["tools"]), 9)
     case("闲聊不强制调用", fcC.calls[0]["tool_choice"], "auto")
     case("它说什么就显示什么", reply1, "你那张 s1 打早了。")
     case("一问一答都进历史", (pC.messages[-2]["role"], pC.messages[-1]["role"]), ("user", "assistant"))
@@ -992,7 +1005,7 @@ def _selftest() -> int:
     case("笔记真的落盘了", "p2 别急着打" in note.read_text(encoding="utf-8"), True)
     case("旧的那条没被冲掉", "老的一条" in note.read_text(encoding="utf-8"), True)
     case("调用带回了回执", any(m["role"] == "tool" for m in pN.messages), True)
-    case("整局就这一张工具表", len(TOOLS), 8)
+    case("整局就这一张工具表", len(TOOLS), 9)
 
     # 5i 中场暂停：他喊停，这一手就不打
     fcP = _FakeClient([ChatResult(content="等一下，我想问一句。",

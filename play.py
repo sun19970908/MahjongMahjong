@@ -111,6 +111,8 @@ def screen(game: Game, me: int, buddy: int, status: str, log: list[str],
         fixed = (v.get("melds") or {}).get(s, [])
         hand_n = v["hand_sizes"].get(s, "?")
         head = f" {who}  {hand_n} 张"
+        if v.get("ting", {}).get(s):
+            head += paint(" ●报听", MINE)
         if fixed:
             head += "   面子 " + "  ".join(mini(m) for m in fixed)
         elif s != me:
@@ -155,7 +157,7 @@ def describe(a: Action) -> str:
         return f"杠{face(tile_id(a.tile))[0].strip()}"
     if a.kind == "chi":
         return "吃" + "+".join(face(tile_id(t))[0].strip() for t in a.combo)
-    return {"win": "胡！", "pass": "过", "draw": "摸牌"}.get(a.kind, a.kind)
+    return {"win": "胡！", "pass": "过", "draw": "摸牌", "ting": "报听"}.get(a.kind, a.kind)
 
 
 def draw_screen(text: str) -> None:
@@ -183,6 +185,9 @@ def apply_and_note(game: Game, act: Action, log: list[str], me: int) -> None:
             log.append(f"{SEAT[e.seat]} 吃 " + "+".join(face(x)[0].strip() for x in e.data["use"]))
         elif t == "kan":
             log.append(f"{SEAT[e.seat]} 杠 {name}")
+        elif t == "ting":
+            waits = "、".join(face(t)[0].strip() for t in (e.data or {}).get("waits", []))
+            log.append(f"{SEAT[e.seat]} 报听" + (f"（等 {waits}）" if waits else ""))
         elif t == "win":
             log.append(f"*** {SEAT[e.seat]} 胡了！")
         elif t == "draw_game":
@@ -311,7 +316,8 @@ def main() -> int:
         if d.seat == me and llm and not args.no_prefetch:
             llm.impl.prefetch_async(game.observe(buddy))
 
-        status = ("轮到你了（/p 中场暂停）" if p.supports == "human"
+        status = ("你听牌了，报不报？（/p 中场暂停）" if d.kind == "ting_declare" and p.supports == "human"
+                  else "轮到你了（/p 中场暂停）" if p.supports == "human"
                   else f"{p.name} 等待接入，牌局停在这一手" if p.supports == "external"
                   else f"{p.name} 在算……" if p.supports == "llm" else p.name)
         draw_screen(screen(game, me, buddy, status, log, d.legal if p.supports == "human" else None,

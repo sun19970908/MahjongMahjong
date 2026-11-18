@@ -182,6 +182,7 @@ class RuleConfig:
     # 听牌
     max_waits: int = 1                  # 不能有两张或以上胡牌
     piao_hu_exempt_waits: bool = True   # 飘胡除外
+    require_ting: bool = True           # 没报听不许胡；报听后手牌锁死（杠除外）
 
     # 动作
     allow_chi: bool = True
@@ -336,6 +337,8 @@ class HandView:
     discards: dict[int, tuple[int, ...]] = field(default_factory=dict)
     wall_left: int | None = None
     last: tuple[int, str, int] | None = None   # (出牌者, 'discard', 牌)
+    ting: dict[int, bool] = field(default_factory=dict)   # 谁已经报听了
+    drawn: int | None = None                    # 自己回合刚摸进来的那张
 
 
 class Referee:
@@ -452,12 +455,18 @@ class Referee:
         out: list[Action] = []
 
         own_turn = view.last is None or view.last[0] == seat
+        ting = bool(view.ting.get(seat))
         if own_turn:
-            if self.is_win(counts, fixed).ok:
+            if self.is_win(counts, fixed).ok and (not self.cfg.require_ting or ting):
                 out.append(Action("win"))
-            for t in range(KINDS):
-                if counts[t]:
-                    out.append(Action("discard", tile=t))
+            if ting:
+                # 报听之后手牌锁死：只能把刚摸进来的那张打回去（杠例外）
+                if view.drawn is not None and counts[view.drawn]:
+                    out.append(Action("discard", tile=view.drawn))
+            else:
+                for t in range(KINDS):
+                    if counts[t]:
+                        out.append(Action("discard", tile=t))
             if self.cfg.allow_kan:
                 for t in range(KINDS):
                     if self.cfg.allow_closed_kan and counts[t] >= 4:
@@ -469,13 +478,14 @@ class Referee:
         src, kind, tile = view.last
         if kind == "discard":
             c = list(counts); c[tile] += 1
-            if self.is_win(tuple(c), fixed).ok:
+            if self.is_win(tuple(c), fixed).ok and (not self.cfg.require_ting or ting):
                 out.append(Action("win", tile=tile, meta={"from": src}))
-            if self.cfg.allow_pon and counts[tile] >= 2:
-                out.append(Action("pon", tile=tile, meta={"from": src}))
+            if not ting:
+                if self.cfg.allow_pon and counts[tile] >= 2:
+                    out.append(Action("pon", tile=tile, meta={"from": src}))
             if self.cfg.allow_kan and counts[tile] >= 3:
                 out.append(Action("kan", tile=tile, meta={"kind": "open", "from": src}))
-            if self.cfg.allow_chi and src == (seat - 1) % view.seats:
+            if not ting and self.cfg.allow_chi and src == (seat - 1) % view.seats:
                 for combo in self._chi_combos(counts, tile):
                     out.append(Action("chi", tile=tile, combo=combo, meta={"from": src}))
         out.append(Action("pass"))
@@ -493,8 +503,12 @@ class Referee:
                 return Result(False, "NOT_YOUR_TURN", "还没轮到你出牌")
             if action.tile is None or counts[action.tile] <= 0:
                 return Result(False, "NOT_IN_HAND", "这张不在手里")
+            if view.ting.get(seat) and view.drawn is not None and action.tile != view.drawn:
+                return Result(False, "TING_LOCKED", "报听后只能把刚摸进来的那张打回去")
             return Result(True, "OK")
         if action.kind == "win":
+            if self.cfg.require_ting and not view.ting.get(seat):
+                return Result(False, "NEED_TING", "还没报听，不能胡")
             c = list(counts)
             if view.last and view.last[0] != seat and view.last[1] == "discard":
                 c[view.last[2]] += 1
@@ -517,6 +531,8 @@ class Referee:
                 return Result(True, "OK")
             return Result(False, "KAN_KIND", f"自己回合只能暗杠或加杠，收到 {kind}")
         if action.kind in ("pon", "kan", "chi"):
+            if view.ting.get(seat) and action.kind in ("pon", "chi"):
+                return Result(False, "TING_LOCKED", "报听之后不能碰、不能吃")
             if view.last is None or view.last[0] == seat or view.last[1] != "discard":
                 return Result(False, "NO_DISCARD_TO_CLAIM", "没有可吃的牌")
             t = view.last[2]
@@ -576,6 +592,8 @@ class Referee:
             return Action("win")
         if name == "pass":
             return Action("pass")
+        if name == "ting":
+            return Action("ting")
         raise ValueError(f"不认识的动作 {name}")
 
     # ---- 以后补的东西，先把位置占住 ----
@@ -690,7 +708,29 @@ def _selftest() -> int:
     case("工具 enum 只给合法牌", [t["function"]["parameters"]["properties"]["tile"]["enum"] for t in r.tools_for(acts) if t["function"]["name"] == "pon"], [["m1"]])
 
     bad = r.validate(view, 0, Action("win"))
-    case("宣布胡牌被拒", (bad.ok, bad.code), (False, "ILLEGAL_WIN"))
+    case("没报听就胡被拒", (bad.ok, bad.code), (False, "NEED_TING"))
+
+    # 11b 报听：手牌锁死、禁碰禁吃、可以杠
+    t14 = _h("1万 1万 2万 3万 4万 5万 6万 7饼 8饼 9饼 4条 5条 6条 9条")
+    vT = HandView(seat=0, seats=3, hands={0: t14}, fixed={}, last=None,
+                  ting={0: True}, drawn=parse_tile("9条"))
+    kT = {a.kind for a in r.legal_actions(vT, 0)}
+    case("报听后只能打摸进来的那张", [ (a.kind, a.tile) for a in r.legal_actions(vT, 0) if a.kind == "discard"],
+         [("discard", parse_tile("9条"))])
+    case("报听后打别的牌被拒", r.validate(vT, 0, Action("discard", tile=parse_tile("1万"))).code, "TING_LOCKED")
+    case("报听后不许碰", r.validate(
+        HandView(seat=0, seats=3, hands={0: _h("1万 1万 2万 3万 4万 5万 6万 7饼 8饼 9饼 4条 5条"), 1: _h("1万 1万 1万"), 2: _h("2饼 2饼 2饼")},
+                 fixed={}, wall_left=40, last=(2, "discard", parse_tile("1万")), ting={0: True}),
+        0, Action("pon", tile=parse_tile("1万"))).code, "TING_LOCKED")
+
+    # 11c 报听后加杠照旧可以做（用户口径：听牌之后能杠）
+    vK = HandView(seat=0, seats=3,
+                  hands={0: _h("7饼 1万 2万 3万 4条 5条 6条 8条 8条 9饼 9饼")},
+                  fixed={0: (Meld("triplet", (parse_tile("7饼"),) * 3),)}, last=None,
+                  ting={0: True}, drawn=parse_tile("9饼"))
+    KK = [a for a in r.legal_actions(vK, 0) if a.kind == "kan"]
+    case("报听后还能加杠", [(a.tile, (a.meta or {}).get("kind")) for a in KK],
+         [(parse_tile("7饼"), "added")])
 
     # 12 出牌校验
     v2 = HandView(seat=0, seats=3, hands={0: _h(h13)}, last=None)
