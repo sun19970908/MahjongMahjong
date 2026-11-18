@@ -111,13 +111,6 @@ def ask(impl, req: dict) -> tuple[Action | None, str]:
     return impl.decide(d)
 
 
-def ask(impl: LLMPlayer, req: dict) -> tuple[Action | None, str]:
-    legal = [a for a in (as_action(x) for x in req.get("legal") or []) if a]
-    d = Decision(seat=int(req["seat"]), kind=str(req["kind"]), legal=legal,
-                 view=req.get("view") or {})
-    return impl.decide(d)
-
-
 def fallback(legal: list[Action]) -> Action | None:
     for kind in ("pass", "draw"):
         for a in legal:
