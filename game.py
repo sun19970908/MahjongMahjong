@@ -814,6 +814,36 @@ def _selftest() -> int:
     g.apply(Action("kan", tile=p7, meta={"kind": "open", "from": 2}))
     case("别人打的牌杠出来没人抢", g.phase, "kan_draw")
 
+    # 6d 抢杠优先于后开花：杠的人尾张本来能开花，也得先让人抢
+    def bloom_rob_setup() -> Game:
+        g = Game(GameConfig(seed=19))
+        g.start()
+        for s in range(4):
+            g.hands[s] = [0] * KINDS
+            g.fixed[s] = []
+            g.discards[s] = []
+            g.ting[s] = False
+        g.hands[0] = _h("7饼 7饼 7饼 7饼 1万 2万 3万 4条 5条 6条 7条 8条 9条 9饼")
+        g.hands[1] = _h("1万 2万 3万 4万 5万 6万 5条 5条 5条 8饼 9饼 1饼 1饼")
+        g.ting[1] = True
+        g.wall = deque([parse_tile("1万")] * 5 + [p9])
+        g.turn, g.phase, g.last, g.drawn = 0, "discard", None, None
+        g.apply(Action("kan", tile=p7, meta={"kind": "in_hand"}))
+        return g
+
+    g = bloom_rob_setup()
+    case("先给抢杠，不给开花", (g.pending().seat, g.pending().kind), (1, "react"))
+    g.apply(next(a for a in g.pending().legal if a.kind == "win"))
+    case("抢杠胡了就没有后开花", (g.result["seat"], g.result["rob"], g.result["bloom"]), (1, True, False))
+
+    g = bloom_rob_setup()
+    for _ in range(5):                   # 抢杠的人都过，才轮到杠的人补张
+        if g.phase != "react":
+            break
+        g.apply(Action("pass"))
+    case("没人抢才轮到杠的人补张", g.phase, "kan_draw")
+    case("没人抢，尾张能胡才给开花", [a.kind for a in g.pending().legal], ["draw", "bloom"])
+
     # 5 荒庄：牌墙摸空
     g = Game(GameConfig(seats=3, seed=3))
     g.start()
