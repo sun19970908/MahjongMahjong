@@ -281,17 +281,26 @@ def parse_players(text: str, seats: int = 4) -> list[SeatPlan]:
             if not item:
                 continue
             left, _, kind = item.partition("=")
+            _check_seat(int(left.strip()), seats)
             assigns[int(left.strip())] = kind.strip()
     else:
         for i, kind in enumerate((x.strip() for x in spec.split(",")), start=1):
             if kind:
+                _check_seat(i, seats)
                 assigns[i] = kind
     return [SeatPlan(s + 1, assigns.get(s + 1, "random")) for s in range(seats)]
+
+
+def _check_seat(seat: int | None, seats: int) -> None:
+    if seat is not None and not 1 <= seat <= seats:
+        raise ValueError(f"没这个座位：{seat}（这桌只有 1…{seats} 号）")
 
 
 def plan_from_flags(*, seats: int = 4, human: int | None = None,
                     buddy: int | None = None, agent: int | None = None) -> list[SeatPlan]:
     """老参数（--seat / --buddy / --agent）也能读成计划，默认谁都没坐就全随机。"""
+    for v in (human, buddy, agent):
+        _check_seat(v, seats)
     kinds: dict[int, str] = {}
     if human is not None:
         kinds[human] = "human"
