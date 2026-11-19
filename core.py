@@ -584,7 +584,7 @@ class TableCore:
             if d.kind == "draw" and len(d.legal) == 1:
                 with self.lock:
                     events = game.apply(Action("draw"))
-                    self._note_events(events, d.seat)
+                    self._note_events(events)
                     self.steps += 1
                     self._pending_decision = None
                     self._safe_persist_locked()
@@ -668,7 +668,7 @@ class TableCore:
                     self.log.append("*** " + self._error)
                     # 这一手不合法时不能直接吞掉；让 UI 重新选。
                     continue
-                self._note_events(events, d.seat)
+                self._note_events(events)
                 self.steps += 1
                 self._safe_persist_locked()
 
@@ -1114,14 +1114,21 @@ class TableCore:
 
     # ---------- 事件日志 ----------
 
-    def _note_events(self, events, me_idx: int) -> None:
+    def _note_events(self, events) -> None:
+        mine = self.me
         for e in events:
             t = e.type
             name = tile_label(tile_id(e.tile)) if e.tile is not None else ""
-            if t == "draw" and e.seat == me_idx:
-                self.log.append(f"你摸到 {name}")
-            elif t == "kan_draw" and e.seat == me_idx:
-                self.log.append(f"你补张 {name}")
+            if t == "draw":
+                if e.seat == mine:
+                    self.log.append(f"你摸到 {name}")
+                else:
+                    self.log.append(f"{seats_mod.label(e.seat)}号 摸到 {name}")
+            elif t == "kan_draw":
+                if e.seat == mine:
+                    self.log.append(f"你补张 {name}")
+                else:
+                    self.log.append(f"{seats_mod.label(e.seat)}号 补张 {name}")
             elif t == "discard":
                 self.log.append(f"{seats_mod.label(e.seat)}号 打 {name}")
             elif t == "pon":
