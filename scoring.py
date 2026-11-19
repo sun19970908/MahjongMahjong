@@ -12,7 +12,7 @@
       杠、叉、吃都算进来，几种牌各凑四张就叠几番；
     * 三红中 1 番；红中凑齐四张时再叠一个四归一，共 2 番；
     * 三清本身 1 番，三家全闷时统一再记 1 番闷，共 2 番；
-    * 没赢至少输一番：三家都付，每家先记「保底」1 番，再叠自己的
+    * 没赢至少输一个：三家都付，每家先记「保底」0 番（2^0=1 分），再叠自己的
       庄家/点炮/闷/手把一/流泪；
     * 分数 = 底分 × 2^番（封顶 8 番）：自摸各家按自己的番付，点炮那家再多一份点炮番。
 """
@@ -57,7 +57,7 @@ LOSE_FANS: tuple[Fan, ...] = (
     Fan("men", "闷", "整局没开过门、没亮过副露（之后杠了照样算）"),
     Fan("hand_one", "手把一", "四组面子全亮出去，手里只剩一张"),
     Fan("tears", "流泪", "被抢杠，或者杠完马上点炮"),
-    Fan("floor", "保底", "有人胡，三家都至少按 1 番付"),
+    Fan("floor", "保底", "有人胡，三家都至少按 1 分付（0 番）", per=0),
 )
 
 FAN_BY_CODE = {f.code: f for f in WIN_FANS + LOSE_FANS}
@@ -176,7 +176,7 @@ def _win_lines(ctx: Context) -> list[Fan]:
 
 def _own_lines(p: Payer, sanqing: bool) -> list[Fan]:
     """某个付款人自己的输家番：只落在他这一笔上，不摊给别家。"""
-    out: list[Fan] = [FAN_BY_CODE["floor"]]   # 有人胡，三家都至少输这一番
+    out: list[Fan] = [FAN_BY_CODE["floor"]]   # 有人胡，三家都至少付 1 分；保底本身 0 番
 
     def add(code: str) -> None:
         out.append(FAN_BY_CODE[code])
@@ -195,7 +195,7 @@ def _own_lines(p: Payer, sanqing: bool) -> list[Fan]:
 
 
 def settle(ctx: Context, *, base: int = BASE_POINTS, cap: int = FAN_CAP) -> Settlement:
-    """赢家番三家共担，各家再叠自己的输家番；每家至少 1 番。"""
+    """赢家番三家共担，各家再叠自己的输家番；没赢至少付 1 分（保底 0 番）。"""
     s = Settlement()
     s.lines = _win_lines(ctx)
     s.total = sum(f.per for f in s.lines)
@@ -230,10 +230,13 @@ def _selftest() -> int:
 
     s = settle(Context(**base, zimo=True, payers=others))
     case("自摸", (codes(s), s.total), (["zimo"], 1))
-    case("自摸三家都付保底", (s.payers, s.points), ({0: 4, 1: 4, 3: 4}, 12))
+    case("自摸三家都付底分", (s.payers, s.points), ({0: 2, 1: 2, 3: 2}, 6))
+
+    s = settle(Context(**base, payers=others))
+    case("无番胡：保底 0 番，三家各付 1 分", (s.payers, s.points), ({0: 1, 1: 1, 3: 1}, 3))
 
     s = settle(Context(**base, zimo=True, closed_ting=True, payers=others))
-    case("闭门自摸 = 闭门听 + 自摸", (codes(s), s.total, s.payers), (["zimo", "closed_ting"], 2, {0: 8, 1: 8, 3: 8}))
+    case("闭门自摸 = 闭门听 + 自摸", (codes(s), s.total, s.payers), (["zimo", "closed_ting"], 2, {0: 4, 1: 4, 3: 4}))
 
     s = settle(Context(**base, zimo=True, closed_ting=True, sanqing=True,
                        payers=[Payer(i, men=True) for i in (0, 1, 3)]))
@@ -242,29 +245,29 @@ def _selftest() -> int:
 
     s = settle(Context(**base, zimo=True, sanqing=True,
                        payers=[Payer(i, men=True) for i in (0, 1, 3)]))
-    case("三家都闷，闷只加一次", (codes(s), s.total, s.payers), (["zimo", "sanqing", "men"], 3, {0: 16, 1: 16, 3: 16}))
+    case("三家都闷，闷只加一次", (codes(s), s.total, s.payers), (["zimo", "sanqing", "men"], 3, {0: 8, 1: 8, 3: 8}))
 
     s = settle(Context(**base, closed_ting=True,
                        payers=[Payer(0, discard=True, men=True), Payer(1), Payer(3)]))
     case("闷点炮给闭门听 = 闭门听 + 点炮 + 闷",
-         (codes(s), own(s, 0), 4, s.payers[0]), (["closed_ting"], ["floor", "discard", "men"], 4, 16))
+         (codes(s), own(s, 0), 4, s.payers[0]), (["closed_ting"], ["floor", "discard", "men"], 4, 8))
 
     s = settle(Context(**base, payers=[Payer(0, dealer=True, discard=True), Payer(1), Payer(3)]))
     case("庄家点炮：庄家番只算他这一笔", (codes(s), own(s, 0), s.payers),
-         ([], ["floor", "dealer", "discard"], {0: 8, 1: 2, 3: 2}))
+         ([], ["floor", "dealer", "discard"], {0: 4, 1: 1, 3: 1}))
 
     s = settle(Context(**base, payers=[Payer(0, discard=True, tears=True), Payer(1), Payer(3)]))
-    case("抢杠 = 点炮 + 流泪", (own(s, 0), s.payers[0]), (["floor", "discard", "tears"], 8))
+    case("抢杠 = 点炮 + 流泪", (own(s, 0), s.payers[0]), (["floor", "discard", "tears"], 4))
 
     s = settle(Context(**base, payers=[Payer(0, discard=True, hand_tiles=1), Payer(1), Payer(3)]))
     case("输家手把一", own(s, 0), ["floor", "discard", "hand_one"])
 
     s = settle(Context(**base, payers=[Payer(0, discard=True), Payer(1), Payer(3)]))
-    case("点炮那家多付，另外两家保底", s.payers, {0: 4, 1: 2, 3: 2})
+    case("点炮那家多付，另外两家各付 1 分", s.payers, {0: 2, 1: 1, 3: 1})
 
     s = settle(Context(**base, zimo=True,
                        payers=[Payer(0, dealer=True), Payer(1), Payer(3)]))
-    case("庄家是付款人时只他多付", (s.total, s.payers), (1, {0: 8, 1: 4, 3: 4}))
+    case("庄家是付款人时只他多付", (s.total, s.payers), (1, {0: 4, 1: 2, 3: 2}))
 
     four = [0] * KINDS
     four[0] = four[1] = 4
