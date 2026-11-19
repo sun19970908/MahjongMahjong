@@ -24,6 +24,18 @@ python board.py --watch 2        # 每 2 秒把 state.json 画成 桌面.html
 
 牌面贴图在 `tiles/`（公共领域，来源见 `tiles/README.md`），会被烘进 HTML，单文件就能带走。
 
+## 快照与回退
+
+每步落子前写一帧 `snapshots/<场次>/step_NNNNN.json`，默认每场保留最近 200 帧：
+
+```bash
+python rollback.py              # 列出最近 20 帧
+python rollback.py --to 42      # 回到第 42 步落子之前
+python rollback.py --latest     # 回到最近一帧
+```
+
+恢复前会把当前 `state.json` 备份成 `state.before-rollback.json`；停掉牌桌进程后，再运行 `python play.py --resume` 接着打。
+
 ## 分层
 
 | 文件 | 管什么 |
@@ -35,7 +47,8 @@ python board.py --watch 2        # 每 2 秒把 state.json 画成 桌面.html
 | `players.py` | 玩家层：`HumanPlayer` / `LLMSeat` / `ExternalPlayer` / `RandomPlayer`，加 `SeatPlan`/`build_players`/`Table` 这套装配。**要加新玩家类型，只改这里和 `KINDS`。** |
 | `llm_player.py` | 牌友的大脑：提示词、工具调用、预算、笔记。 |
 | `play.py` | TUI 与主循环：排座、画画面、暂停聊天、多局轮转。 |
-| `state.py` | 存档/读档（含庄家、骰子、杠数、闭门听这些新字段）。 |
+| `state.py` | 存档/读档（含庄家、骰子、杠数、闭门听这些新字段），以及每步快照。 |
+| `rollback.py` | 列出/恢复每步快照。 |
 | `board.py` | 把存档画成网页桌面。 |
 | `seat_io.py` / `watch.py` | 外部座位的文件协议 / 自动手。 |
 

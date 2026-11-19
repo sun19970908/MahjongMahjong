@@ -124,6 +124,13 @@ def save(path: Path | str, game: Game, meta: dict | None = None) -> None:
     os.replace(tmp, p)
 
 
+def save_step(path: Path | str, game: Game, meta: dict | None = None) -> None:
+    """每步快照：和 state.json 同格式，目录不存在就建。"""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    save(p, game, meta)
+
+
 def load(path: Path | str) -> tuple[Game, dict] | None:
     p = Path(path)
     if not p.exists():

@@ -33,6 +33,8 @@ import state
 
 NUM = "一二三四五六七八九"
 TRACE_PATH = Path(__file__).resolve().parent / "trace.jsonl"
+SNAP_ROOT = Path(__file__).resolve().parent / "snapshots"
+SNAP_KEEP = 200
 STATE_PATH = Path(__file__).resolve().parent / "state.json"
 
 ESC = "\x1b["
@@ -389,6 +391,14 @@ def main() -> int:
     if len({p.seat for p in plans}) != len(plans):
         raise SystemExit("座位号撞了，一个人只能坐一张椅子")
 
+    # 快照按一场牌分组：接存档沿用原来的场，新开一场新建目录。
+    run_id = ""
+    if saved:
+        run_id = str((saved[1] or {}).get("snapshot_run") or "")
+    if not run_id:
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+    SNAP_DIR = SNAP_ROOT / run_id
+
     n_seats = len(plans)
 
     # ---- 座位：谁坐哪儿全由计划说，这里只负责把牌友那只椅子造出来 ----
@@ -437,16 +447,32 @@ def main() -> int:
         """每家的最后一句话都留着，标的是说这话的那个人，不是此刻轮到的这个人。"""
         return "\n".join(f"{names.get(s, '')}：{t}" for s, t in sorted(said.items()) if t.strip())
 
-    def persist() -> None:
-        if args.no_save:
-            return
-        state.save(STATE_PATH, game, {
+    def meta_now() -> dict:
+        return {
             "you": seats_mod.label(me), "buddy": None if buddy is None else seats_mod.label(buddy),
             "agent": None if agent is None else seats_mod.label(agent),
             "steps": steps, "said": said, "log": log[-30:], "phase": game.phase,
+            "snapshot_run": run_id,
             "llm": None if not llm else {"messages": llm.impl.messages,
                                          "pause_calls": llm.impl._pause_calls},
-        })
+        }
+
+    def persist() -> None:
+        if args.no_save:
+            return
+        state.save(STATE_PATH, game, meta_now())
+
+    def snapshot(d) -> None:
+        """落子前留一帧；快照名就是这一步的序号，回退到它就回到这手之前。"""
+        if args.no_save:
+            return
+        meta = meta_now()
+        meta["snapshot"] = {"step": steps, "next": d.kind,
+                            "seat": d.seat, "wall": len(game.wall)}
+        state.save_step(SNAP_DIR / f"step_{steps:05d}.json", game, meta)
+        old = sorted(SNAP_DIR.glob("step_*.json"))[:-SNAP_KEEP]
+        for p in old:
+            p.unlink(missing_ok=True)
     board = {s: 0 for s in range(n_seats)}        # 累计分，按座位下标记账
     rounds = max(1, args.rounds)
     winner = None
@@ -469,6 +495,7 @@ def main() -> int:
 
         while game.pending() is not None:
             d = game.pending()
+            snapshot(d)
             # 普通摸牌只有一个动作，直接摸；杠后补张可能同时有「摸牌 / 后开花」，
             # 必须把选择权留给玩家，不能先替他摸掉。
             if d.kind == "draw" and len(d.legal) == 1:
