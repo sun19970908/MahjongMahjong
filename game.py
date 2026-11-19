@@ -104,6 +104,8 @@ class GameConfig:
     start_hand: int = 13
     dealer: int | None = None        # 引擎下标；None = 开盘掷骰定庄
     seed: int | None = None
+    base_points: int = 1             # 结算底分
+    fan_cap: int = 8                 # 封顶几番
 
     allow_chi: bool = True
     allow_pon: bool = True
@@ -556,7 +558,7 @@ class Game:
             melds_at_ting=len(self.fixed[seat]),
             hand_tiles=max(0, sum(counts) - 1),   # 手里剩几张（不算胡的那张）
         )
-        return scoring.settle(ctx).to_dict()
+        return scoring.settle(ctx, base=self.cfg.base_points, cap=self.cfg.fan_cap).to_dict()
 
     # ---------- 观察 ----------
     def observe(self, seat: int) -> dict:

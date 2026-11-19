@@ -46,6 +46,7 @@ def snapshot(game: Game, meta: dict | None = None) -> dict:
         "version": VERSION,
         "cfg": {"seats": game.cfg.seats, "start_hand": game.cfg.start_hand,
                 "dealer": game.dealer, "seed": game.cfg.seed,
+                "base_points": game.cfg.base_points, "fan_cap": game.cfg.fan_cap,
                 "dice": None if game.dice is None else [game.dice.a, game.dice.b, game.dice.total]},
         "game": {
             "hands_format": "counts",          # 计数数组，不是牌名；手牌张数 = sum(counts)
@@ -77,7 +78,8 @@ def snapshot(game: Game, meta: dict | None = None) -> dict:
 def restore(data: dict) -> tuple[Game, dict]:
     cfg = data.get("cfg") or {}
     game = Game(GameConfig(seats=cfg.get("seats", 4), start_hand=cfg.get("start_hand", 13),
-                           dealer=cfg.get("dealer"), seed=cfg.get("seed")))
+                           dealer=cfg.get("dealer"), seed=cfg.get("seed"),
+                           base_points=cfg.get("base_points", 1), fan_cap=cfg.get("fan_cap", 8)))
     dice = cfg.get("dice")
     if dice:
         game.dice = seats.Dice(int(dice[0]), int(dice[1]), int(dice[2]), seats.label(game.dealer))

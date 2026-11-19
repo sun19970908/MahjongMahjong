@@ -271,6 +271,8 @@ def main() -> int:
     ap.add_argument("--players", default=None,
                     help='整桌人一次说清："1=human,2=llm,3=external,4=random" 或 "human,llm,external,random"')
     ap.add_argument("--dealer", type=int, default=None, help="庄家坐几号；不给就掷骰子定")
+    ap.add_argument("--base", type=int, default=1, help="结算底分（默认 1）")
+    ap.add_argument("--fan-cap", type=int, default=8, help="封顶番数（默认 8）")
     ap.add_argument("--agent-wait", type=float, default=0.0, help="外部座位最多等几秒，0=死等")
     ap.add_argument("--demo", action="store_true")
     ap.add_argument("--offline", action="store_true")
@@ -355,7 +357,8 @@ def main() -> int:
         print(f" 接上第 {steps} 步：{meta.get('phase', '')}，牌墙 {len(game.wall)} 张")
     else:
         dealer = None if args.dealer is None else seats_mod.index(args.dealer, n_seats)
-        game = Game(GameConfig(seats=n_seats, seed=args.seed, dealer=dealer))
+        game = Game(GameConfig(seats=n_seats, seed=args.seed, dealer=dealer,
+                               base_points=args.base, fan_cap=args.fan_cap))
         game.start()
         log = []
         said: dict[int, str] = {}
@@ -384,7 +387,8 @@ def main() -> int:
         if rnd:                              # 下一局：庄家胡了连庄，否则下家坐庄
             nxt = seats_mod.next_dealer(game.dealer, winner, n_seats)
             seed = None if args.seed is None else args.seed + rnd
-            game = Game(GameConfig(seats=n_seats, seed=seed, dealer=nxt))
+            game = Game(GameConfig(seats=n_seats, seed=seed, dealer=nxt,
+                                   base_points=args.base, fan_cap=args.fan_cap))
             game.start()
             said.clear()
             log.clear()

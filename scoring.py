@@ -98,7 +98,7 @@ def points_for(fan: int, base: int = BASE_POINTS, cap: int = FAN_CAP) -> int:
     return base * (2 ** min(max(fan, 0), cap))
 
 
-def settle(ctx: Context) -> Settlement:
+def settle(ctx: Context, *, base: int = BASE_POINTS, cap: int = FAN_CAP) -> Settlement:
     """按规则原文一条条判，谁满足就给谁加番。"""
     s = Settlement()
 
@@ -138,7 +138,7 @@ def settle(ctx: Context) -> Settlement:
         add("tears")
 
     s.total = sum(f.per for f in s.lines)
-    s.points = points_for(s.total)
+    s.points = points_for(s.total, base, cap)
 
     if ctx.zimo:
         s.payers = {i: s.points for i in range(ctx.seats) if i != ctx.winner}
