@@ -276,7 +276,8 @@ class LLMPlayer:
         budget_react: int = 1000,
         budget_discard: int = 3000,
         budget_ting: int = 200,
-        budget_chat: int = 3000,
+        budget_chat: int = 1200,
+        budget_final: int = 6000,
         budget_tiny: int = 40,
         debug_cache: bool = False,
     ) -> None:
@@ -304,7 +305,8 @@ class LLMPlayer:
         self.budget_react = budget_react
         self.budget_discard = budget_discard
         self.budget_ting = budget_ting         # 报听之后手牌锁死，没什么好想的
-        self.budget_chat = budget_chat         # 聊天单独一档，不吃出牌那份低预算
+        self.budget_chat = budget_chat         # 中场/局间聊天：够记必要信息就行
+        self.budget_final = budget_final       # 终场改长期笔记：放开让它随便改
         self.budget_tiny = budget_tiny       # 补刀那一遍：够它把话翻成调用就行
         self.debug_cache = debug_cache       # 每次请求后打一行命中率
         self.cache_stats: list[dict] = []
@@ -716,11 +718,14 @@ class LLMPlayer:
         """跟它说话。phase=pause 局中暂停，between 局间，after 整场打完。
 
         接在同一段历史后面发，工具表整局一张，前缀缓存照旧命中。
-        预算单算一档：报听后的低预算只管出牌，聊天永远满额（暂停也一样）。
-        要它别磨蹭，靠的是点暂停那一刻先把还在飞的自由思考掐掉，不是砍预算。
+        预算按场景分：终场要改长期笔记，给 budget_final，放开让它随便改；
+        中场/局间只给 budget_chat，够记必要信息就行。
+        报听后的低预算只管出牌，聊天不吃那一档；要它别磨蹭，靠的是点暂停那一刻
+        先把还在飞的自由思考掐掉，不是砍预算。
         """
         self._phase = phase
-        budget = self.budget_chat if budget is None else budget
+        if budget is None:
+            budget = self.budget_final if phase == "after" else self.budget_chat
         # 有人开口之前，先把还在飞的自由思考掐掉：不然这条聊天排在它后面，
         # 你得对着"牌先停着"等它把那手空想完。
         self.cut_prefetch()
@@ -1294,23 +1299,23 @@ def _selftest() -> int:
     case("一问一答都进历史", (pC.messages[-2]["role"], pC.messages[-1]["role"]), ("user", "assistant"))
     pC.chat("你平时打多久")
     case("第二句不再重复开场", "【终场聊天】" in fcC.calls[1]["messages"][-1]["content"], False)
-    case("闲聊预算给到 3000", fcC.calls[1]["reasoning_budget"], 3000)
-    case("闲聊的 max_tokens 跟着给足", fcC.calls[1]["max_tokens"], 4000)
+    case("终场闲聊预算放开到 6000", fcC.calls[1]["reasoning_budget"], 6000)
+    case("终场 max_tokens 跟着给足", fcC.calls[1]["max_tokens"], 8000)
 
-    # 5d-2 报听的低预算只管出牌，散场聊天照旧满额
+    # 5d-2 报听的低预算只管出牌，散场改笔记用终场档
     fcT = _FakeClient([ChatResult(content="打这张", tool_call={"name": "discard", "arguments": {"tile": notin}}),
                        ChatResult(content="这局你打得太保守了。")])
     pT = LLMPlayer(fcT, 0, log_path=None)
     pT.decide(tired)
     case("出牌吃的是低预算", fcT.calls[0]["reasoning_budget"], 200)
     pT.chat("我打得怎么样")
-    case("报听之后聊天预算恢复满", fcT.calls[-1]["reasoning_budget"], 3000)
+    case("报听之后聊天预算恢复终场档", fcT.calls[-1]["reasoning_budget"], 6000)
 
-    # 5d-3 暂停也拿满额预算，但点暂停那一刻要先把自由思考掐断（见 play.py）
+    # 5d-3 暂停给够记事的预算，点暂停那一刻要先把自由思考掐断（见 play.py）
     fcP2 = _FakeClient([ChatResult(content="先停着，你说。")])
     pP2 = LLMPlayer(fcP2, 0, log_path=None)
     pP2.chat("停一下", phase="pause")
-    case("暂停聊天也是满额预算", fcP2.calls[0]["reasoning_budget"], 3000)
+    case("暂停聊天只给够记事的预算", fcP2.calls[0]["reasoning_budget"], 1200)
 
     # 5e 打完能改笔记
     import tempfile
@@ -1396,6 +1401,7 @@ def _selftest() -> int:
     pB.chat("局间随便聊", phase="between")
     case("局间有单独的开场", "【局间闲聊】" in fcB.calls[0]["messages"][-1]["content"], True)
     case("局间只让追加长期笔记", "mode=append" in fcB.calls[0]["messages"][-1]["content"], True)
+    case("局间聊天也只给够记事的预算", fcB.calls[0]["reasoning_budget"], 1200)
 
     noteL = Path(tempfile.gettempdir()) / "_mahjong_note_long.md"
     noteL.write_text("", encoding="utf-8")
