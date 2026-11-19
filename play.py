@@ -275,6 +275,7 @@ def main() -> int:
     ap.add_argument("--demo", action="store_true")
     ap.add_argument("--offline", action="store_true")
     ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--rounds", type=int, default=1, help="连打几局（打完结分、庄家轮转）")
     ap.add_argument("--steps", type=int, default=0)
     ap.add_argument("--no-prefetch", action="store_true")
     ap.add_argument("--no-color", action="store_true")
@@ -367,75 +368,101 @@ def main() -> int:
             "llm": None if not llm else {"messages": llm.impl.messages,
                                          "pause_calls": llm.impl._pause_calls},
         })
-    while game.pending() is not None:
-        d = game.pending()
-        if d.kind == "draw":
-            apply_and_note(game, Action("draw"), log, me)
+    board = {s: 0 for s in range(4)}        # 累计分，按座位下标记账
+    rounds = max(1, args.rounds)
+    winner = None
+    stopped = False
+
+    for rnd in range(rounds):
+        if rnd:                              # 下一局：庄家胡了连庄，否则下家坐庄
+            nxt = seats_mod.next_dealer(game.dealer, winner, 4)
+            seed = None if args.seed is None else args.seed + rnd
+            game = Game(GameConfig(seats=4, seed=seed, dealer=nxt))
+            game.start()
+            said.clear()
+            log.clear()
+            log.append(f"—— 第 {rnd + 1} 局：{seats_mod.label(nxt)} 号坐庄 ——")
+
+        while game.pending() is not None:
+            d = game.pending()
+            if d.kind == "draw":
+                apply_and_note(game, Action("draw"), log, me)
+                steps += 1
+                persist()
+                continue
+
+            p = table.at(d.seat)
+            # 轮到我出手时，让牌友先把自由思考跑起来（别人回合的空档不算浪费）
+            if d.seat == me and llm and not args.no_prefetch:
+                llm.impl.prefetch_async(game.observe(buddy))
+
+            status = ("你听牌了，报不报？（/p 中场暂停）" if d.kind == "ting_declare" and p.supports == "human"
+                      else "轮到你了（/p 中场暂停）" if p.supports == "human"
+                      else f"{p.name} 接入中……" if p.supports == "external"
+                      else f"{p.name} 在算……" if p.supports == "llm" else p.name)
+
+            def show_wait(sec: float, name: str = p.name) -> None:
+                """等接入位的时候每秒重画一次：那个秒数在走，就说明牌子没死在这儿。"""
+                draw_screen(screen(game, me, buddy, f"{name} 接入中…… 已等 {sec:.0f}s（不接就超时自动走一手）",
+                                   log, say=said_text(), names=names))
+            if p.supports == "external":
+                p.on_wait = show_wait
+            draw_screen(screen(game, me, buddy, status, log, d.legal if p.supports == "human" else None,
+                               say=said_text(), names=names))
+
+            t0 = time.time()
+            act, speech = p.decide(d)
+            took = time.time() - t0
+            if speech.strip():
+                said[d.seat] = speech.strip()      # 每家留着自己最后那句话，别人再打牌也不冲掉
+
+            if act is None:                       # 有人要求中场暂停：这一手先不打
+                draw_screen(screen(game, me, buddy, "牌先停着", log, say=said_text(), names=names))
+                opener = speech
+                actor = p.name
+                if p.supports == "human" and talker:   # 我按的暂停：让牌友先说一句（chat 自己会把空闲思考掐掉）
+                    opener = talker.chat("（我按了暂停，先停一下，想跟你说两句）", phase="pause") or ""
+                    actor = names.get(buddy, "")
+                pause_talk(talker, names.get(buddy, ""), opener, actor)
+                continue
+
+            log.append(f"{seats_mod.label(d.seat)}号 出手 {paint(f'[{took:.1f}s]', DIM)}")
+            if tracer:
+                row = {"seat": d.seat, "name": p.name, "decision": d.kind, "action": act.to_dict(),
+                       "seconds": round(took, 2), "say": speech[:60]}
+                if llm and d.seat == llm.seat and llm.impl.cache_stats:
+                    st = llm.impl.cache_stats[-1]
+                    row.update(prompt=st["prompt"], cached=st["cached"],
+                               read=max(0, st["prompt"] - st["cached"]))
+                tracer.log(**row)
+
+            apply_and_note(game, act, log, me)
             steps += 1
             persist()
-            continue
+            if args.steps and steps >= args.steps:
+                draw_screen(screen(game, me, buddy, f"走到第 {steps} 步打住", log, say=said_text(), names=names))
+                stopped = True
+                break
 
-        p = table.at(d.seat)
-        # 轮到我出手时，让牌友先把自由思考跑起来（别人回合的空档不算浪费）
-        if d.seat == me and llm and not args.no_prefetch:
-            llm.impl.prefetch_async(game.observe(buddy))
-
-        status = ("你听牌了，报不报？（/p 中场暂停）" if d.kind == "ting_declare" and p.supports == "human"
-                  else "轮到你了（/p 中场暂停）" if p.supports == "human"
-                  else f"{p.name} 接入中……" if p.supports == "external"
-                  else f"{p.name} 在算……" if p.supports == "llm" else p.name)
-
-        def show_wait(sec: float, name: str = p.name) -> None:
-            """等接入位的时候每秒重画一次：那个秒数在走，就说明牌子没死在这儿。"""
-            draw_screen(screen(game, me, buddy, f"{name} 接入中…… 已等 {sec:.0f}s（不接就超时自动走一手）",
-                               log, say=said_text(), names=names))
-        if p.supports == "external":
-            p.on_wait = show_wait
-        draw_screen(screen(game, me, buddy, status, log, d.legal if p.supports == "human" else None,
-                           say=said_text(), names=names))
-
-        t0 = time.time()
-        act, speech = p.decide(d)
-        took = time.time() - t0
-        if speech.strip():
-            said[d.seat] = speech.strip()      # 每家留着自己最后那句话，别人再打牌也不冲掉
-
-        if act is None:                       # 有人要求中场暂停：这一手先不打
-            draw_screen(screen(game, me, buddy, "牌先停着", log, say=said_text(), names=names))
-            opener = speech
-            actor = p.name
-            if p.supports == "human" and talker:   # 我按的暂停：让牌友先说一句（chat 自己会把空闲思考掐掉）
-                opener = talker.chat("（我按了暂停，先停一下，想跟你说两句）", phase="pause") or ""
-                actor = names.get(buddy, "")
-            pause_talk(talker, names.get(buddy, ""), opener, actor)
-            continue
-
-        log.append(f"{seats_mod.label(d.seat)}号 出手 {paint(f'[{took:.1f}s]', DIM)}")
-        if tracer:
-            row = {"seat": d.seat, "name": p.name, "decision": d.kind, "action": act.to_dict(),
-                   "seconds": round(took, 2), "say": speech[:60]}
-            if llm and d.seat == llm.seat and llm.impl.cache_stats:
-                st = llm.impl.cache_stats[-1]
-                row.update(prompt=st["prompt"], cached=st["cached"],
-                           read=max(0, st["prompt"] - st["cached"]))
-            tracer.log(**row)
-
-        apply_and_note(game, act, log, me)
-        steps += 1
-        persist()
-        if args.steps and steps >= args.steps:
-            draw_screen(screen(game, me, buddy, f"走到第 {steps} 步打住", log, say=said_text(), names=names))
-            break
-
-    else:
         res = game.result or {}
         if res.get("type") == "draw_game":
             msg = "荒庄：牌墙摸空"
         elif res.get("settle"):
             msg = str(res["settle"].get("text") or "")
         else:
-            msg = str(res)
+            msg = str(res) if res else f"这一局打到第 {steps} 步"
         draw_screen(screen(game, me, buddy, msg, log, say=said_text(), names=names))
+
+        settle = res.get("settle") or {}
+        for k, v in (settle.get("payers") or {}).items():
+            board[int(k)] -= int(v)
+            board[int(res["seat"])] += int(v)
+        winner = res.get("seat")
+        if any(board.values()):
+            print(" 累计：" + "　".join(
+                f"{names.get(s) or str(seats_mod.label(s)) + '号'} {board[s]:+d}" for s in range(4)))
+        if stopped:
+            break
 
     if llm:
         print(f" 牌友出牌 {len(llm.impl.records)} 次，兜底 "
