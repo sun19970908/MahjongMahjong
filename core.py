@@ -218,7 +218,7 @@ def _result_payload(result: dict | None) -> dict | None:
 
 
 def make_broadcast(rnd: int, rounds: int, res: dict, board: dict[int, int],
-                   buddy: int | None, ended_early: bool = False) -> str:
+                   you: int | None, ended_early: bool = False) -> str:
     head = f"【第{rnd}/{rounds}局播报】"
     if ended_early:
         head += "提前结束，这一局没结算。"
@@ -251,8 +251,8 @@ def make_broadcast(rnd: int, rounds: int, res: dict, board: dict[int, int],
     if board:
         head += "累计：" + "，".join(
             f"{seats_mod.label(s)}号 {board[s]:+d}" for s in range(len(board)))
-        if buddy is not None:
-            head += f"；你 {board.get(buddy, 0):+d}。"
+        if you is not None:
+            head += f"；你 {board.get(you, 0):+d}。"
     return head
 
 
@@ -337,7 +337,7 @@ class TableCore:
                 self._ended_early = True
                 self._finished = True
                 self._broadcast = make_broadcast(
-                    self.round, self.rounds, {}, self.board, self.buddy, True)
+                    self.round, self.rounds, {}, self.board, self.me, True)
                 info = {
                     "round": self.round, "rounds": self.rounds, "result": None,
                     "board": {str(s + 1): int(self.board.get(s, 0)) for s in range(4)},
@@ -530,12 +530,25 @@ class TableCore:
                 p.cancel_event = self._stop
 
     def _restore_llm(self, meta: dict) -> None:
-        if self.llm and meta.get("llm"):
-            try:
-                self.llm.impl.messages = list(meta["llm"].get("messages") or self.llm.impl.messages)
-                self.llm.impl._pause_calls = int(meta["llm"].get("pause_calls") or 0)
-            except (TypeError, ValueError):
-                pass
+        if not (self.llm and meta.get("llm")):
+            return
+        try:
+            msgs = list(meta["llm"].get("messages") or self.llm.impl.messages)
+            # 回退/接档时如果牌局还没收，旧上下文里的“终场聊天”必须剪掉，
+            # 否则牌友会带着上一支的收场话继续打，还会把“提前结束”记进笔记。
+            if self.game is not None and self.game.result is None \
+                    and self.game.phase != "ended":
+                cut = None
+                for i, msg in enumerate(msgs):
+                    content = str(msg.get("content") or "")
+                    if msg.get("role") == "user" and "【终场聊天】" in content:
+                        cut = i
+                if cut is not None:
+                    msgs = msgs[:cut]
+            self.llm.impl.messages = msgs or self.llm.impl.messages
+            self.llm.impl._pause_calls = int(meta["llm"].get("pause_calls") or 0)
+        except (TypeError, ValueError):
+            pass
 
     def _load_meta(self, meta: dict) -> None:
         self.run_id = str(meta.get("snapshot_run") or "")
@@ -702,7 +715,7 @@ class TableCore:
                     self.board[winner] = self.board.get(winner, 0) + sum(
                         int(v) for v in (settle.get("payers") or {}).values())
             self._broadcast = make_broadcast(
-                self.round, self.rounds, res, self.board, self.buddy, self._ended_early)
+                self.round, self.rounds, res, self.board, self.me, self._ended_early)
             last = self.round >= self.rounds or self._ended_early or self._stopped_by_limit
             info = {
                 "round": self.round,
