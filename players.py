@@ -67,8 +67,12 @@ class BasePlayer:
         return False
 
 
+class EndEarly(Exception):
+    """人在键盘上按了提前结束：不再打后面的局，直接收场。"""
+
+
 class HumanPlayer(BasePlayer):
-    """你：键盘输入。打 /p 就是要求中场暂停（返回 None）。"""
+    """你：键盘输入。打 /p 就是要求中场暂停（返回 None），/e 提前结束整场。"""
 
     def __init__(self, seat: int) -> None:
         super().__init__(seat)
@@ -86,6 +90,8 @@ class HumanPlayer(BasePlayer):
                 raise SystemExit("退了。")
             if raw in ("/p", "p", "暂停"):
                 return None, ""
+            if raw in ("/e", "提前结束"):
+                raise EndEarly()
             if raw.isdigit() and 1 <= int(raw) <= len(opts):
                 return opts[int(raw) - 1], ""
 

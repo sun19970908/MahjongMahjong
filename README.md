@@ -14,6 +14,8 @@ python play.py --demo --offline                  # 不调模型，四家随机�
 
 座位号一律从 **1** 起（命令行、TUI、`seats/seatN/` 目录、`state.json` 的 meta 都是）；引擎内部仍用 0 基下标，换算只走 `seats.label()/index()`。
 
+轮到你出牌时可以输入 `/p` 中场暂停，或 `/e` 提前结束这一场（当前局不结算，直接进终场聊天）。
+
 网页桌面（另开浏览器看，不影响 TUI）：
 
 ```bash

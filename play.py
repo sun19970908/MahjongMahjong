@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from game import Action, Game, GameConfig
 from llm_player import LLMPlayer, StrataClient
-from players import ExternalPlayer, HumanPlayer, LLMSeat, RandomPlayer, SeatPlan, Tracer
+from players import ExternalPlayer, HumanPlayer, LLMSeat, RandomPlayer, SeatPlan, Tracer, EndEarly
 from players import build_players, parse_players, plan_from_flags
 from referee import tile_id
 import seats as seats_mod
@@ -388,6 +388,7 @@ def main() -> int:
     rounds = max(1, args.rounds)
     winner = None
     stopped = False
+    ended_early = False
     finished_all = False
 
     for rnd in range(rounds):
@@ -416,10 +417,10 @@ def main() -> int:
             if d.seat == me and llm and not args.no_prefetch:
                 llm.impl.prefetch_async(game.observe(buddy))
 
-            status = ("最后四张：抓了不打，能胡就胡（海底捞月），不能胡就过（/p 中场暂停）"
+            status = ("最后四张：抓了不打，能胡就胡（海底捞月），不能胡就过（/p 中场暂停 /e 提前结束）"
                       if getattr(game, "hai", False)
-                      else "你听牌了，报不报？（/p 中场暂停）" if d.kind == "ting_declare" and p.supports == "human"
-                      else "轮到你了（/p 中场暂停）" if p.supports == "human"
+                      else "你听牌了，报不报？（/p 中场暂停 /e 提前结束）" if d.kind == "ting_declare" and p.supports == "human"
+                      else "轮到你了（/p 中场暂停 /e 提前结束）" if p.supports == "human"
                       else f"{p.name} 接入中……" if p.supports == "external"
                       else f"{p.name} 在算……" if p.supports == "llm" else p.name)
 
@@ -433,7 +434,12 @@ def main() -> int:
                                say=said_text(), names=names))
 
             t0 = time.time()
-            act, speech = p.decide(d)
+            try:
+                act, speech = p.decide(d)
+            except EndEarly:                  # 你按了 /e：当前这局不结算，后面局也不打
+                ended_early = True
+                log.append("*** 提前结束：后面不打了")
+                break
             took = time.time() - t0
             if speech.strip():
                 said[d.seat] = speech.strip()      # 每家留着自己最后那句话，别人再打牌也不冲掉
@@ -467,7 +473,9 @@ def main() -> int:
                 break
 
         res = game.result or {}
-        if res.get("type") == "draw_game":
+        if ended_early:
+            msg = "提前结束：这一场到这儿（当前这局没结算）"
+        elif res.get("type") == "draw_game":
             msg = "荒庄：牌墙摸空"
         elif res.get("settle"):
             msg = str(res["settle"].get("text") or "")
@@ -485,13 +493,16 @@ def main() -> int:
                 f"{names.get(s) or str(seats_mod.label(s)) + '号'} {board[s]:+d}" for s in range(n_seats)))
 
         # 打完一局就开聊；连打时这只是局间，只能往草稿里追加长期笔记
-        last = (rnd == rounds - 1) or stopped
-        if last and game.result:
+        last = ended_early or (rnd == rounds - 1) or stopped
+        if last and (game.result or ended_early):
             finished_all = True
-        if talker and game.result:
+        if talker and (game.result or ended_early):
             phase = "after" if last else "between"
-            if last:
-                print("\n 所有局都打完了。想跟牌友聊两句就直接打字，空行回车结束。")
+            if ended_early:
+                print("\n 提前结束，进入终场聊天。想跟牌友聊两句就直接打字，空行回车结束。")
+                print(" （现在可以改长期笔记了，改完下次开桌生效）")
+            elif last:
+                print("\n 所有局都打完了，进入终场聊天。想跟牌友聊两句就直接打字，空行回车结束。")
                 print(" （现在可以改长期笔记了，改完下次开桌生效）")
             else:
                 print("\n 这一局打完了，下一局还没开。想跟牌友聊两句就直接打字，空行回车结束。")
@@ -506,7 +517,7 @@ def main() -> int:
                     break
                 print(f" {names.get(buddy) or ''}：{talker.chat(line, phase=phase)}", flush=True)
 
-        if stopped:
+        if stopped or ended_early:
             break
 
     if llm:

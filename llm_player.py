@@ -733,7 +733,7 @@ class LLMPlayer:
                     "现在只能追加长期笔记（target=long，mode=append），草稿整场留着，"
                     "全部局打完才并档；要改笔记原文等最后一场打完。\n")
         else:
-            head = ("【散场闲聊】所有局都打完了，现在是闲聊时间。就照你自己的性子说话，"
+            head = ("【终场聊天】这一场到这儿了，现在是闲聊时间。就照你自己的性子说话，"
                     "可以聊刚才那几手，也可以聊别的。现在可以改长期笔记：追加或改原文都行，"
                     "改完下次开桌的顶部生效。\n")
         if phase == "after":
@@ -748,7 +748,7 @@ class LLMPlayer:
         if phase == "between":
             head += "\n（这一局的经验要留，就追加长期笔记：target=long；草稿整场有效，全部打完才并档。）\n"
         elif phase == "after":
-            head += "\n（现在可以追加或改长期笔记：target=long；改完下次开桌顶部生效。临时笔记下一局会清空。）\n"
+            head += "\n（这一场的经验要留，就追加或改长期笔记：target=long；改完下次开桌顶部生效。临时笔记下一局会清空。）\n"
         # 换场景或新一局的第一句，再把当前笔记和规矩递一遍；同一场里后面的话不重复贴
         fresh = (not self._chatted) or phase != self._last_chat_phase
         said = (head + text) if fresh else text
@@ -1287,13 +1287,13 @@ def _selftest() -> int:
                        ChatResult(content="随便聊，你平时打多久？")])
     pC = LLMPlayer(fcC, 0, log_path=None)
     reply1 = pC.chat("我刚才打得怎么样")
-    case("第一句带开场说明", "【散场闲聊】" in fcC.calls[0]["messages"][-1]["content"], True)
+    case("第一句带开场说明", "【终场聊天】" in fcC.calls[0]["messages"][-1]["content"], True)
     case("闲聊也带整张工具表", len(fcC.calls[0]["tools"]), 10)
     case("闲聊不强制调用", fcC.calls[0]["tool_choice"], "auto")
     case("它说什么就显示什么", reply1, "你那张 s1 打早了。")
     case("一问一答都进历史", (pC.messages[-2]["role"], pC.messages[-1]["role"]), ("user", "assistant"))
     pC.chat("你平时打多久")
-    case("第二句不再重复开场", "【散场闲聊】" in fcC.calls[1]["messages"][-1]["content"], False)
+    case("第二句不再重复开场", "【终场聊天】" in fcC.calls[1]["messages"][-1]["content"], False)
     case("闲聊预算给到 3000", fcC.calls[1]["reasoning_budget"], 3000)
     case("闲聊的 max_tokens 跟着给足", fcC.calls[1]["max_tokens"], 4000)
 
