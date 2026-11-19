@@ -469,7 +469,9 @@ def main() -> int:
 
         while game.pending() is not None:
             d = game.pending()
-            if d.kind == "draw":
+            # 普通摸牌只有一个动作，直接摸；杠后补张可能同时有「摸牌 / 后开花」，
+            # 必须把选择权留给玩家，不能先替他摸掉。
+            if d.kind == "draw" and len(d.legal) == 1:
                 apply_and_note(game, Action("draw"), log, me)
                 steps += 1
                 persist()
