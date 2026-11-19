@@ -276,7 +276,7 @@ class LLMPlayer:
         budget_react: int = 1000,
         budget_discard: int = 3000,
         budget_ting: int = 200,
-        budget_chat: int = 1200,
+        budget_chat: int = 3000,
         budget_final: int = 6000,
         budget_tiny: int = 40,
         debug_cache: bool = False,
@@ -305,7 +305,7 @@ class LLMPlayer:
         self.budget_react = budget_react
         self.budget_discard = budget_discard
         self.budget_ting = budget_ting         # 报听之后手牌锁死，没什么好想的
-        self.budget_chat = budget_chat         # 中场/局间聊天：够记必要信息就行
+        self.budget_chat = budget_chat         # 中场/局间聊天：3000，够记事也不拖
         self.budget_final = budget_final       # 终场改长期笔记：放开让它随便改
         self.budget_tiny = budget_tiny       # 补刀那一遍：够它把话翻成调用就行
         self.debug_cache = debug_cache       # 每次请求后打一行命中率
@@ -1315,7 +1315,7 @@ def _selftest() -> int:
     fcP2 = _FakeClient([ChatResult(content="先停着，你说。")])
     pP2 = LLMPlayer(fcP2, 0, log_path=None)
     pP2.chat("停一下", phase="pause")
-    case("暂停聊天只给够记事的预算", fcP2.calls[0]["reasoning_budget"], 1200)
+    case("暂停聊天给 3000 预算", fcP2.calls[0]["reasoning_budget"], 3000)
 
     # 5e 打完能改笔记
     import tempfile
@@ -1401,7 +1401,7 @@ def _selftest() -> int:
     pB.chat("局间随便聊", phase="between")
     case("局间有单独的开场", "【局间闲聊】" in fcB.calls[0]["messages"][-1]["content"], True)
     case("局间只让追加长期笔记", "mode=append" in fcB.calls[0]["messages"][-1]["content"], True)
-    case("局间聊天也只给够记事的预算", fcB.calls[0]["reasoning_budget"], 1200)
+    case("局间聊天也给 3000 预算", fcB.calls[0]["reasoning_budget"], 3000)
 
     noteL = Path(tempfile.gettempdir()) / "_mahjong_note_long.md"
     noteL.write_text("", encoding="utf-8")
