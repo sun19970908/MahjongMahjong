@@ -506,7 +506,7 @@ def main() -> int:
                 print(" （现在可以改长期笔记了，改完下次开桌生效）")
             else:
                 print("\n 这一局打完了，下一局还没开。想跟牌友聊两句就直接打字，空行回车结束。")
-                print(" （现在只能追加长期笔记，草稿整场攒着，全部打完再并档）")
+                print(" （现在只能追加长期笔记；想直接收场就打 /e，进入终场聊天）")
             while True:
                 try:
                     line = input(" 你：").strip()
@@ -515,6 +515,12 @@ def main() -> int:
                     break
                 if not line:
                     break
+                if phase == "between" and line in ("/e", "提前结束"):
+                    ended_early = True
+                    finished_all = True
+                    phase = "after"
+                    print("\n 提前结束，进入终场聊天。现在可以改长期笔记了。")
+                    continue
                 print(f" {names.get(buddy) or ''}：{talker.chat(line, phase=phase)}", flush=True)
 
         if stopped or ended_early:

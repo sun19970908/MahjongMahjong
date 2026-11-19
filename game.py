@@ -604,18 +604,15 @@ class Game:
             for t in m.tiles:
                 all_counts[t] += 1
         payers = []
-        if zimo:
-            for s in range(self.cfg.seats):
-                if s != seat:
-                    payers.append(scoring.Payer(
-                        s, dealer=s == self.dealer, men=self._men(s),
-                        hand_tiles=sum(self.hands[s])))
-        elif from_seat is not None:
+        for s in range(self.cfg.seats):
+            if s == seat:
+                continue
             payers.append(scoring.Payer(
-                from_seat, dealer=from_seat == self.dealer,
-                discard=True, men=self._men(from_seat),
-                hand_tiles=sum(self.hands[from_seat]),
-                tears=rob or from_seat == self.after_kan))
+                s, dealer=s == self.dealer, men=self._men(s),
+                discard=(not zimo and s == from_seat),
+                hand_tiles=sum(self.hands[s]),
+                tears=not zimo and s == from_seat and (rob or from_seat == self.after_kan),
+            ))
         ctx = scoring.Context(
             winner=seat, dealer=self.dealer, seats=self.cfg.seats,
             zimo=zimo, bloom=bloom, kan_draw=kan_draw, hai=hai,
@@ -902,7 +899,7 @@ def _selftest() -> int:
     case("抢杠的选项里有胡", [a.kind for a in d.legal], ["win", "pass"])
     g.apply(next(a for a in d.legal if a.kind == "win"))
     case("抢杠胡成立", (g.result["type"], g.result["seat"], g.result["rob"]), ("win", 1, True))
-    codes = [f["code"] for f in next(iter(g.result["settle"]["payer_fans"].values()))]
+    codes = [f["code"] for f in g.result["settle"]["payer_fans"]["0"]]
     case("抢杠结算：点炮和流泪都在", ("discard" in codes, "tears" in codes), (True, True))
     case("没报听的人抢不了杠", rob_setup(listen=False).phase, "kan_draw")
 
