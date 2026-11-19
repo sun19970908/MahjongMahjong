@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import threading
 import time
 import urllib.request
@@ -1027,6 +1028,30 @@ class LLMPlayer:
         with self._lock:
             self._resp = resp
 
+    @staticmethod
+    def _hard_abort(resp) -> None:
+        """把底层 socket 也 shutdown 掉。
+
+        只调 resp.close() 时，Windows 上另一个线程可能还卡在阻塞 read 上，
+        关掉对象不一定会把它唤醒；这块连接就还占着模型唯一的生成槽。
+        先 shutdown，再 close，读的那头才会立刻返回/抛错。
+        """
+        sock = None
+        for obj in (resp, getattr(resp, "fp", None),
+                    getattr(getattr(resp, "fp", None), "raw", None)):
+            sock = getattr(obj, "_sock", None)
+            if sock is not None:
+                break
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        try:
+            resp.close()
+        except Exception:
+            pass
+
     def cut_prefetch(self) -> None:
         """掐断还在飞的自由思考，把模型通道立刻让给出牌。
 
@@ -1036,12 +1061,9 @@ class LLMPlayer:
             resp, thread = self._resp, self._prefetch_thread
             self._resp = None
         if resp is not None:
-            try:
-                resp.close()
-            except Exception:
-                pass
+            self._hard_abort(resp)
         if thread is not None and thread.is_alive():
-            thread.join(timeout=1.0)     # 等它把 _prefetching 放掉，别和出牌那次请求叠在一起
+            thread.join(timeout=3.0)     # 等它把 _prefetching 放掉，别和出牌那次请求叠在一起
 
     # ---- 缓存命中 ----
     def _note_cache(self, label: str, r: ChatResult) -> None:
