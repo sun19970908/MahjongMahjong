@@ -485,6 +485,8 @@ def main() -> int:
             status = ("最后四张：抓了不打，能胡就胡（海底捞月），不能胡就过（/p 中场暂停 /e 提前结束）"
                       if getattr(game, "hai", False)
                       else "你听牌了，报不报？（/p 中场暂停 /e 提前结束）" if d.kind == "ting_declare" and p.supports == "human"
+                      else "杠后补张：能后开花就输 2，正常摸牌输 1（/p 中场暂停 /e 提前结束）"
+                      if d.kind == "draw" and any(a.kind == "bloom" for a in d.legal) and p.supports == "human"
                       else "轮到你了（/p 中场暂停 /e 提前结束）" if p.supports == "human"
                       else f"{p.name} 接入中……" if p.supports == "external"
                       else f"{p.name} 在算……" if p.supports == "llm" else p.name)
