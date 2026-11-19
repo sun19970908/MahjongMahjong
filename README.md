@@ -28,6 +28,7 @@ python board.py --watch 2        # 每 2 秒把 state.json 画成 桌面.html
 python webui.py                  # 默认 1号网页、2号牌友、3/4随机；有未完成存档就接着打
 python webui.py --new            # 强制新开一桌
 python webui.py --resume         # 强制接当前 state.json
+python webui.py --debug          # 调试全牌：四家手牌直接显示在座位里，仅本地教学用
 python webui.py --port 8765      # 换端口
 ```
 

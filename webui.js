@@ -8,6 +8,8 @@
   let busy = false;
   let dismissedResult = "";
   let lastStateKey = "";
+  let showAll = false;
+  let debugInit = false;
 
   function tileName(tid) {
     if (!tid) return "?";
@@ -115,11 +117,18 @@
     panel.appendChild(head);
 
     if (!seat.is_me) {
-      const backs = document.createElement("div");
-      backs.className = "backs";
-      const n = Math.max(0, Number(seat.hand_count) || 0);
-      for (let i = 0; i < n; i++) backs.appendChild(makeBack());
-      panel.appendChild(backs);
+      if (state.debug && showAll && seat.hand && seat.hand.length) {
+        const hand = document.createElement("div");
+        hand.className = "seat-hand";
+        for (const t of seat.hand) hand.appendChild(makeTile(t, "mini"));
+        panel.appendChild(hand);
+      } else {
+        const backs = document.createElement("div");
+        backs.className = "backs";
+        const n = Math.max(0, Number(seat.hand_count) || 0);
+        for (let i = 0; i < n; i++) backs.appendChild(makeBack());
+        panel.appendChild(backs);
+      }
     } else {
       const note = document.createElement("div");
       note.className = "seat-empty";
@@ -362,6 +371,20 @@
       text.textContent = state.ok ? "牌桌已停" : "正在开桌…";
     }
     status.appendChild(text);
+    const debugBtn = $("btn-debug");
+    if (!state.debug) {
+      showAll = false;
+      debugInit = false;
+    } else if (!debugInit) {
+      showAll = true;
+      debugInit = true;
+    }
+    debugBtn.disabled = !state.debug;
+    debugBtn.classList.toggle("on", !!state.debug && showAll);
+    debugBtn.textContent = state.debug ? `全牌：${showAll ? "开" : "关"}` : "全牌：关";
+    debugBtn.title = state.debug
+      ? "切换四家手牌可见"
+      : "启动 webui.py 时加 --debug 才能查看";
     $("btn-resume").disabled = !!state.running || !!state.result;
     $("btn-quit").disabled = !state.running;
 
@@ -482,6 +505,14 @@
     toast("牌桌已停。");
   }
 
+  function toggleDebug() {
+    if (!state || !state.debug) return;
+    showAll = !showAll;
+    lastStateKey = "";
+    render();
+  }
+
+  $("btn-debug").addEventListener("click", toggleDebug);
   $("btn-new").addEventListener("click", newGame);
   $("btn-resume").addEventListener("click", resumeGame);
   $("btn-quit").addEventListener("click", quitGame);

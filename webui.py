@@ -260,8 +260,8 @@ def _names(meta: dict) -> dict[int, str]:
     return names
 
 
-def public_state(runner: GameRunner) -> dict:
-    """从存档/文件信箱抽出网页该看的牌桌。任何别家手牌都不在这里。"""
+def public_state(runner: GameRunner, debug: bool = False) -> dict:
+    """从存档/文件信箱抽出网页该看的牌桌。默认不暴露别家手牌。"""
     saved = state.load(STATE_PATH)
     if saved is None:
         return {"ok": False, "message": "还没有牌局存档，正在等 play.py 开局。",
@@ -320,6 +320,10 @@ def public_state(runner: GameRunner) -> dict:
             "name": names.get(s, f"{s}号"),
             "is_me": s == OWN_SEAT,
             "hand_count": int(_at(hand_sizes, idx, 0) or 0),
+            "hand": (
+                my_hand if s == OWN_SEAT
+                else list(game.observe(idx).get("hand") or [])
+            ) if debug else None,
             "melds": seat_melds,
             "discards": list(_at(discards, idx, []) or []),
             "ting": bool(_at(ting, idx, False)),
@@ -353,6 +357,7 @@ def public_state(runner: GameRunner) -> dict:
     return {
         "ok": True,
         **runner._status(),
+        "debug": bool(debug),
         "own_seat": OWN_SEAT,
         "seats": seats,
         "hand": my_hand,
@@ -384,6 +389,7 @@ def public_state(runner: GameRunner) -> dict:
 
 class Handler(BaseHTTPRequestHandler):
     runner: GameRunner
+    debug = False
 
     def log_message(self, fmt: str, *args) -> None:      # 不刷终端
         return
@@ -413,7 +419,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/state":
             try:
-                self._json(public_state(self.runner))
+                self._json(public_state(self.runner, debug=self.debug))
             except Exception as exc:                  # noqa: BLE001 - 页面要看见错误
                 self._json({"ok": False, "message": str(exc), **self.runner._status()},
                            HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -498,6 +504,8 @@ def main() -> int:
                     help="传给 play.py 的座位表；默认 1号网页、2号牌友、3/4随机")
     ap.add_argument("--new", action="store_true", help="强制新开，不接 state.json")
     ap.add_argument("--resume", action="store_true", help="强制接 state.json")
+    ap.add_argument("--debug", action="store_true",
+                    help="调试全牌：网页可见四家手牌（本地教学用，正常对局别开）")
     ap.add_argument("--no-start", action="store_true", help="只起网页，不开牌桌")
     ap.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
     args = ap.parse_args()
@@ -516,11 +524,14 @@ def main() -> int:
         print(" --no-start 和 --resume 一起用没有意义：没有开桌进程就没有可接的牌局")
 
     Handler.runner = runner
+    Handler.debug = args.debug
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.daemon_threads = True
     url = f"http://{args.host}:{args.port}/"
     print(f" 网页牌桌：{url}")
     print(" 1号在网页里出牌，2号牌友照旧走 LLM；Ctrl+C 收摊。")
+    if args.debug:
+        print(" DEBUG：网页可见四家手牌（只在本机教学用）")
     if not args.no_open:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     try:
