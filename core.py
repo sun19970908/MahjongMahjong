@@ -1123,12 +1123,12 @@ class TableCore:
                 if e.seat == mine:
                     self.log.append(f"你摸到 {name}")
                 else:
-                    self.log.append(f"{seats_mod.label(e.seat)}号 摸到 {name}")
+                    self.log.append(f"{seats_mod.label(e.seat)}号 摸牌")
             elif t == "kan_draw":
                 if e.seat == mine:
                     self.log.append(f"你补张 {name}")
                 else:
-                    self.log.append(f"{seats_mod.label(e.seat)}号 补张 {name}")
+                    self.log.append(f"{seats_mod.label(e.seat)}号 补张")
             elif t == "discard":
                 self.log.append(f"{seats_mod.label(e.seat)}号 打 {name}")
             elif t == "pon":
