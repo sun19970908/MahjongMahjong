@@ -240,6 +240,14 @@ def round_broadcast(rnd: int, rounds: int, res: dict, board: dict[int, int],
         else:
             how = f"{seats_mod.label(res.get('from'))}号点炮"
         head += f"{who} 胡 {tile}（{how}）。"
+        hand = res.get("hand") or []
+        if hand:
+            head += "赢家牌：" + " ".join(face(t)[0].strip() for t in hand) + "。"
+        melds = res.get("melds") or []
+        if melds:
+            head += "副露：" + "；".join(
+                " ".join(face(t)[0].strip() for t in m.get("tiles") or ())
+                for m in melds) + "。"
     settle = res.get("settle") or {}
     if settle.get("text"):
         head += f"结算：{settle['text']}。"

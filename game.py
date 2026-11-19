@@ -568,6 +568,11 @@ class Game:
                  hai: bool = False) -> None:
         self.phase = "ended"
         self.hai = False
+        # 收局牌谱：点炮/抢杠的那张还没并进手牌，展示前先补上。
+        final = list(self.hands[seat])
+        if tile is not None and not zimo:
+            final[tile] += 1
+        win_hand = [tile_id(t) for t, n in enumerate(final) for _ in range(n)]
         self.result = {
             "type": "win",
             "seat": seat,
@@ -578,6 +583,9 @@ class Game:
             "bloom": bloom,
             "kan_draw": kan_draw,
             "hai": hai,
+            "hand": win_hand,
+            "melds": [{"kind": m.kind, "tiles": [tile_id(t) for t in m.tiles]}
+                      for m in self.fixed[seat]],
             "settle": self.settle(seat, zimo=zimo, from_seat=from_seat, rob=rob,
                                   bloom=bloom, kan_draw=kan_draw, hai=hai, tile=tile),
         }
