@@ -62,6 +62,7 @@ def snapshot(game: Game, meta: dict | None = None) -> dict:
             "rob": None if game.rob is None else [game.rob[0], tile_id(game.rob[1]), game.rob_kind],
             "result": game.result,
             "ting": {str(s): bool(v) for s, v in game.ting.items()},
+            "piao": {str(s): bool(v) for s, v in game.piao.items()},
             "ting_closed": {str(s): bool(v) for s, v in game.ting_closed.items()},
             "kans": {str(s): int(v) for s, v in game.kans.items()},
             "dead": {str(s): bool(v) for s, v in game.dead_win.items()},
@@ -101,6 +102,8 @@ def restore(data: dict) -> tuple[Game, dict]:
     game.result = gs.get("result")
     ting = gs.get("ting") or {}
     game.ting = {s: bool(ting.get(str(s), False)) for s in range(game.cfg.seats)}
+    piao = gs.get("piao") or {}
+    game.piao = {s: bool(piao.get(str(s), False)) for s in range(game.cfg.seats)}
     closed = gs.get("ting_closed") or {}
     game.ting_closed = {s: bool(closed.get(str(s), False)) for s in range(game.cfg.seats)}
     kans = gs.get("kans") or {}

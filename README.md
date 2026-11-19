@@ -32,7 +32,9 @@ python webui.py --debug          # 调试全牌：四家手牌直接显示在座
 python webui.py --port 8765      # 换端口
 ```
 
-网页只拿 1 号视角：自己的手牌、四家公开的副露/牌河/报听/杠；别家的手牌只显示张数，别人报听不显示在等什么。`play.py` 的 `--no-chat` 是给网页模式用的，跳过局间/终场聊天，避免子进程卡在 `input()`。
+网页只拿 1 号视角：自己的手牌、四家公开的副露/牌河/报听/杠；别家的手牌只显示张数，别人报听不显示在等什么。
+
+网页牌桌现在是**内核 + UI 适配层**：`core.py` 管牌局、存档、快照、多局、暂停/聊天；`webui.py` 只做 HTTP 和按钮队列，`webui.html/js` 只渲染。TUI 的 `play.py` 同样只做终端画面和键盘输入，不再自己跑牌局。
 
 牌面贴图在 `tiles/`（公共领域，来源见 `tiles/README.md`），会被烘进 HTML，单文件就能带走。
 
@@ -58,11 +60,12 @@ python rollback.py --latest     # 回到最近一帧
 | `seats.py` | 座位号换算、掷骰定庄、赛后庄家轮转。 |
 | `players.py` | 玩家层：`HumanPlayer` / `LLMSeat` / `ExternalPlayer` / `RandomPlayer`，加 `SeatPlan`/`build_players`/`Table` 这套装配。**要加新玩家类型，只改这里和 `KINDS`。** |
 | `llm_player.py` | 牌友的大脑：提示词、工具调用、预算、笔记。 |
-| `play.py` | TUI 与主循环：排座、画画面、暂停聊天、多局轮转。 |
+| `core.py` | **牌局内核**：排座、主循环、动作校验、存档、每步快照、多局轮转、暂停/聊天、外部接入等待。TUI 和网页都只是它的 UI。 |
+| `play.py` | TUI 适配层：画终端、读键盘、把编号翻成 `Action`；不跑牌局、不存档、不轮庄。 |
 | `state.py` | 存档/读档（含庄家、骰子、杠数、闭门听这些新字段），以及每步快照。 |
 | `rollback.py` | 列出/恢复每步快照。 |
 | `board.py` | 把存档画成网页桌面。 |
-| `webui.py` / `webui.html` / `webui.js` | 本地网页牌桌：起停 `play.py`、读存档、转动作；只暴露 1 号视角。 |
+| `webui.py` / `webui.html` / `webui.js` | 网页适配层：进程内启动 `TableCore`，HTTP 只收按钮答案和读状态；不判规则、不推进牌局。 |
 | `seat_io.py` / `watch.py` | 外部座位的文件协议 / 自动手。 |
 
 ## 座位文件协议（外部座位）

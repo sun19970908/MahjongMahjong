@@ -17,6 +17,7 @@
     --red:#d9534f;
   }
   *{box-sizing:border-box}
+  .hidden{display:none!important}
   html,body{height:100%}
   body{
     margin:0; color:#f4f2e8;
@@ -28,6 +29,7 @@
   .wrap{width:100%;max-width:none;margin:0 auto;padding:10px 14px 18px;min-height:100vh;
     display:flex;flex-direction:column;flex:1 1 auto}
   .topbar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:10px;flex:0 0 auto}
+  .scorebar,.my-area,.chat-panel{flex:0 0 auto}
   .brand{display:flex;align-items:baseline;gap:12px}
   h1{font-size:22px;margin:0;letter-spacing:.12em;font-weight:700;color:var(--cream)}
   .status{font-size:13px;color:var(--muted)}
@@ -49,7 +51,7 @@
 
   .table{
     position:relative;display:grid;
-    grid-template-columns:340px minmax(0,1fr) 340px;
+    grid-template-columns:370px minmax(0,1fr) 370px;
     grid-template-rows:132px minmax(0,1fr) 132px;
     grid-template-areas:". top ." "left center right" ". bottom .";
     gap:10px;padding:18px;
@@ -147,6 +149,59 @@
   .hint.warn{color:#ffd08a}
   .debug-btn.on{background:#7b4a29;border-color:#e7c46a;color:#ffe9b0}
 
+  /* TUI 里的局数、累计分、聊天、暂停、回退，都在这一层补上 */
+  .scorebar{
+    display:flex;align-items:center;justify-content:space-between;gap:12px;
+    margin:-2px 0 8px;padding:5px 10px;border:1px solid rgba(231,196,106,.18);
+    border-radius:9px;background:rgba(3,18,12,.35);font-size:12px;color:#bcd8c7;
+  }
+  .scorebar .round{color:var(--gold);font-weight:700;letter-spacing:.05em}
+  .scorebar .scores{display:flex;gap:10px;flex-wrap:wrap}
+  .scorebar .score{white-space:nowrap}
+  .scorebar .score b{color:#ffe6a8;font-weight:700}
+
+  .chat-panel{
+    margin-top:10px;border:1px solid #315c48;border-radius:14px;
+    background:rgba(7,29,21,.62);overflow:hidden;
+  }
+  .chat-head{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:8px 12px;font-size:12px;color:#a9c9b7;background:rgba(255,255,255,.03)}
+  .chat-head b{color:var(--cream)}
+  .chat-body{padding:0 12px 10px}
+  .chat-messages{max-height:180px;overflow:auto;display:flex;flex-direction:column;gap:5px;
+    padding:7px 0 8px;font-size:12px;line-height:1.55}
+  .chat-msg{max-width:88%;padding:6px 9px;border-radius:9px;white-space:pre-wrap;word-break:break-word}
+  .chat-msg.user{align-self:flex-end;background:#294f3c;color:#eaf4ee}
+  .chat-msg.buddy{align-self:flex-start;background:#132f24;color:#f1e6c5;border:1px solid #315c48}
+  .chat-msg .who{font-size:10px;color:#8db7a0;display:block;margin-bottom:2px}
+  .chat-input-row{display:flex;gap:7px}
+  .chat-input-row input{
+    flex:1;min-width:0;background:#0b2018;color:#f4f2e8;border:1px solid #315c48;
+    border-radius:8px;padding:8px 10px;font:inherit;font-size:13px;outline:none;
+  }
+  .chat-input-row input:focus{border-color:var(--gold)}
+  .chat-empty{font-size:12px;color:#78a68e;padding:8px 0}
+
+  .modal-card.wide{width:min(94vw,640px)}
+  .settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px}
+  .settings-grid label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:#a9c9b7}
+  .settings-grid input,.settings-grid select{
+    background:#0b2018;color:#f4f2e8;border:1px solid #315c48;border-radius:8px;
+    padding:8px 9px;font:inherit;font-size:13px;outline:none;min-width:0;
+  }
+  .settings-grid .full{grid-column:1 / -1}
+  .settings-note{font-size:11px;color:#8db7a0;margin-top:6px;line-height:1.5}
+  .frames{display:flex;flex-direction:column;gap:6px;max-height:46vh;overflow:auto;margin-top:8px}
+  .frame-row{display:flex;align-items:center;justify-content:space-between;gap:8px;
+    padding:7px 9px;border:1px solid #315c48;border-radius:8px;background:rgba(255,255,255,.04);
+    font-size:12px;color:#d6eadc}
+  .frame-row button{padding:5px 9px;font-size:12px}
+  .modal-payers{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+  .payer{font-size:11px;padding:3px 6px;border-radius:5px;background:rgba(255,255,255,.1);color:#ffd6a8}
+  .modal-board{font-size:12px;color:#cfe7d9;margin-top:7px;line-height:1.6}
+  .modal-broadcast{font-size:12px;color:#a9c9b7;line-height:1.6;margin-top:7px;
+    max-height:96px;overflow:auto;white-space:pre-wrap}
+
   .modal{position:fixed;inset:0;background:rgba(2,7,5,.72);display:flex;align-items:center;justify-content:center;padding:20px;z-index:20}
   .modal.hidden{display:none}
   .modal-card{width:min(92vw,560px);max-height:88vh;overflow:auto;background:linear-gradient(160deg,#174f39,#0c2a1d);border:1px solid #6b9478;border-radius:18px;box-shadow:0 28px 80px rgba(0,0,0,.65);padding:18px 20px}
@@ -160,7 +215,7 @@
   .toast.show{opacity:1}
 
   @media (max-width:1100px){
-    .table{grid-template-columns:270px minmax(0,1fr) 270px}
+    .table{grid-template-columns:300px minmax(0,1fr) 300px}
     .slot.left .seat-panel .seat-hand .tile,
     .slot.right .seat-panel .seat-hand .tile{width:19px;height:30px}
     .slot.left .seat-panel .back,
@@ -184,6 +239,7 @@
     .slot.left .seat-panel .back,
     .slot.right .seat-panel .back{margin-left:0}
     .seat-head{font-size:11px}
+    .settings-grid{grid-template-columns:1fr}
   }
 </style>
 </head>
@@ -196,10 +252,19 @@
     </div>
     <div class="top-actions">
       <button class="ghost debug-btn" id="btn-debug" disabled title="启动时加 --debug 才能查看四家手牌">全牌：关</button>
-      <button class="ghost" id="btn-new">新开一桌</button>
+      <button class="ghost" id="btn-pause" disabled>暂停</button>
+      <button class="ghost" id="btn-end" disabled>提前结束</button>
+      <button class="gold hidden" id="btn-next" disabled>下一局</button>
+      <button class="ghost" id="btn-undo" disabled>回退</button>
+      <button class="ghost" id="btn-settings">新桌设置</button>
       <button class="ghost" id="btn-resume">接着打</button>
       <button class="ghost danger" id="btn-quit">停止牌桌</button>
     </div>
+  </div>
+
+  <div class="scorebar">
+    <span class="round" id="round-text">第 1/1 局</span>
+    <span class="scores" id="score-text"></span>
   </div>
 
   <div class="table" id="table">
@@ -229,21 +294,98 @@
     <div class="actions" id="actions"></div>
     <div class="hint" id="hint"></div>
   </div>
+
+  <div class="chat-panel" id="chat-panel">
+    <div class="chat-head">
+      <div><b>牌友聊天</b> <span id="chat-hint">暂停或一局结束时可以聊两句</span></div>
+      <button class="ghost" id="btn-chat-toggle">收起</button>
+    </div>
+    <div class="chat-body" id="chat-body">
+      <div class="chat-messages" id="chat-messages"></div>
+      <div class="chat-input-row">
+        <input id="chat-input" maxlength="300" placeholder="想跟牌友说两句…" autocomplete="off">
+        <button class="gold" id="chat-send">发送</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <div class="modal hidden" id="modal">
-  <div class="modal-card">
+  <div class="modal-card wide">
     <h2 class="modal-title" id="modal-title">收局</h2>
     <div class="modal-text" id="modal-text"></div>
+    <div class="modal-broadcast" id="modal-broadcast"></div>
     <div class="modal-label" id="modal-label"></div>
     <div class="fans" id="modal-fans"></div>
+    <div class="modal-label">付款</div>
+    <div class="modal-payers" id="modal-payers"></div>
+    <div class="modal-board" id="modal-board"></div>
     <div class="modal-label" id="modal-hand-label">赢家牌</div>
     <div class="tile-row" id="modal-hand"></div>
     <div class="modal-label" id="modal-melds-label">副露</div>
     <div class="melds" id="modal-melds"></div>
     <div class="modal-actions">
       <button class="ghost" id="modal-close">看看牌桌</button>
+      <button class="gold hidden" id="modal-next">下一局</button>
       <button class="gold" id="modal-new">再来一局</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal hidden" id="settings-modal">
+  <div class="modal-card wide">
+    <h2 class="modal-title">新桌设置</h2>
+    <div class="settings-grid">
+      <label class="full">座位表
+        <input id="set-players" value="1=human,2=llm,3=random,4=random"
+               placeholder="1=human,2=llm,3=external,4=random">
+      </label>
+      <label>局数
+        <input id="set-rounds" type="number" min="1" max="20" value="1">
+      </label>
+      <label>庄家（1–4，留空掷骰）
+        <input id="set-dealer" type="number" min="1" max="4" placeholder="掷骰">
+      </label>
+      <label>底分
+        <input id="set-base" type="number" min="0" value="1">
+      </label>
+      <label>封顶番
+        <input id="set-fan-cap" type="number" min="0" value="8">
+      </label>
+      <label>种子（留空随机）
+        <input id="set-seed" type="number" placeholder="随机">
+      </label>
+      <label>步数上限（0=不限）
+        <input id="set-steps" type="number" min="0" value="0">
+      </label>
+      <label>外部接入等待秒数（0=死等）
+        <input id="set-agent-wait" type="number" min="0" step="0.5" value="0">
+      </label>
+      <label>模式
+        <select id="set-offline">
+          <option value="0">正常（牌友可调模型）</option>
+          <option value="1">离线（四家随机）</option>
+        </select>
+      </label>
+    </div>
+    <div class="settings-note">
+      网页自己坐 1 号；3 号写 external 就是文件接入位（seats/seat3/）。<br>
+      局数大于 1 时，每局结束会停下来等你点“下一局”。
+    </div>
+    <div class="modal-actions">
+      <button class="ghost" id="settings-cancel">取消</button>
+      <button class="gold" id="settings-start">开这一桌</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal hidden" id="undo-modal">
+  <div class="modal-card wide">
+    <h2 class="modal-title">回退到哪一手之前</h2>
+    <div class="modal-text" id="undo-text">每一步落子前都留了快照。</div>
+    <div class="frames" id="undo-frames"></div>
+    <div class="modal-actions">
+      <button class="ghost" id="undo-cancel">取消</button>
     </div>
   </div>
 </div>

@@ -10,6 +10,8 @@
   let lastStateKey = "";
   let showAll = false;
   let debugInit = false;
+  let chatCollapsed = true;
+  let chatAutoOpened = false;
 
   function tileName(tid) {
     if (!tid) return "?";
@@ -86,6 +88,11 @@
     return ["bottom", "right", "top", "left"][delta] || "bottom";
   }
 
+  function seatName(no) {
+    const s = (state && state.seats || []).find((x) => x.no === no);
+    return s ? s.name : `${no}号`;
+  }
+
   function renderSeat(seat, slotName) {
     const host = $("slot-" + slotName);
     if (!host) return;
@@ -98,7 +105,7 @@
     who.className = "who";
     who.textContent = seat.name;
     head.appendChild(who);
-    if (state.turn === seat.no && !state.result) {
+    if (state.turn === seat.no && !state.result && !state.finished) {
       const turn = document.createElement("span");
       turn.className = "turn";
       turn.textContent = "● 当前";
@@ -149,17 +156,55 @@
     host.replaceChildren(panel);
   }
 
+  function renderScorebar() {
+    const round = $("round-text");
+    const scores = $("score-text");
+    scores.replaceChildren();
+    if (!state || !state.ok) {
+      round.textContent = "第 — 局";
+      return;
+    }
+    round.textContent = `第 ${state.round || 1}/${state.rounds || 1} 局 · 第 ${state.steps || 0} 步`;
+    const board = state.board || {};
+    for (let no = 1; no <= 4; no++) {
+      const span = document.createElement("span");
+      span.className = "score";
+      const val = Number(board[String(no)] || 0);
+      span.textContent = `${seatName(no)} `;
+      const b = document.createElement("b");
+      b.textContent = (val >= 0 ? "+" : "") + val;
+      span.appendChild(b);
+      scores.appendChild(span);
+    }
+  }
+
   function renderCenter() {
     const main = $("center-main");
     const sub = $("center-sub");
     const wall = $("center-wall");
     const last = $("center-last");
     const log = $("center-log");
+    if (!state || !state.ok) {
+      main.textContent = (state && state.message) || "等牌局";
+      sub.textContent = "";
+      wall.replaceChildren();
+      last.replaceChildren();
+      log.replaceChildren();
+      return;
+    }
+
     const phase = state.phase_label || "?";
     let title = "等牌局";
-
-    if (state.result) {
-      title = state.result.type === "draw_game" ? "荒庄" : "本局结束";
+    let detail = `第 ${state.round || 1}/${state.rounds || 1} 局 · 第 ${state.steps || 0} 步 · ${phase}`;
+    if (state.finished) {
+      title = state.round_info && state.round_info.ended_early ? "提前结束" :
+        (state.result && state.result.type === "draw_game") ? "荒庄" : "本局结束";
+    } else if (state.paused) {
+      title = "牌局暂停";
+      detail += " · 在下方聊天，点“继续”接着打";
+    } else if (state.awaiting_next) {
+      title = "本局结束，等下一局";
+      detail += " · 点“下一局”继续";
     } else if (state.pending) {
       if (state.pending.seat === state.own_seat) {
         const kind = state.pending.kind;
@@ -171,21 +216,24 @@
         else if (kind === "ting_declare") title = "听牌了：报不报？";
         else title = "轮到你了";
       } else {
-        title = `${state.pending.seat}号 待出手`;
+        title = `${state.pending.seat}号 等待出牌`;
+        if (state.waiting && state.waiting.seat === state.pending.seat) {
+          title += ` · 接入中 ${state.waiting.seconds || 0}s`;
+        }
       }
     } else if (state.turn) {
       title = `等 ${state.turn}号`;
     }
     main.textContent = title;
-    sub.textContent = `第 ${state.steps || 0} 步 · ${phase}`;
+    sub.textContent = detail;
 
     wall.replaceChildren();
     const wallText = document.createElement("span");
-    wallText.innerHTML = `牌墙 <b>${state.wall_left || 0}</b> 张`;
+    let wtxt = `牌墙 <b>${state.wall_left || 0}</b> 张`;
+    if (state.dice) wtxt += ` · 骰 ${state.dice[0]}+${state.dice[1]}=${state.dice[2]}`;
+    wallText.innerHTML = wtxt;
     wall.appendChild(wallText);
-    if (state.wall_last) {
-      wall.appendChild(makeTile(state.wall_last, "small"));
-    }
+    if (state.wall_last) wall.appendChild(makeTile(state.wall_last, "small"));
 
     last.replaceChildren();
     if (state.last) {
@@ -201,7 +249,7 @@
 
     log.replaceChildren();
     const rows = [];
-    if (state.log && state.log.length) rows.push(...state.log.slice(-2));
+    if (state.log && state.log.length) rows.push(...state.log.slice(-3));
     if (state.said && state.said.length) {
       const s = state.said[state.said.length - 1];
       rows.push(`${s.name || s.seat + "号"}：${s.text}`);
@@ -258,19 +306,50 @@
     hint.className = "hint";
     hint.textContent = "";
 
+    const pauseBtn = $("btn-pause");
+    const endBtn = $("btn-end");
+    const undoBtn = $("btn-undo");
+    const nextBtn = $("btn-next");
+    nextBtn.classList.toggle("hidden", !(state && state.awaiting_next));
+    nextBtn.disabled = !(state && state.awaiting_next);
     if (!state || !state.ok) {
+      pauseBtn.disabled = true;
+      endBtn.disabled = true;
+      undoBtn.disabled = true;
+      pauseBtn.textContent = "暂停";
       hint.textContent = state && state.message ? state.message : "正在等牌桌…";
       return;
     }
 
-    if (state.result) {
-      hint.textContent = "本局结束，可以新开一桌。";
+    pauseBtn.textContent = state.paused ? "继续" : "暂停";
+    pauseBtn.disabled = !(state.paused || (state.pending && state.pending.seat === state.own_seat));
+    endBtn.disabled = !state.running || state.finished;
+    undoBtn.disabled = !(state.running || state.finished);
+
+    if (state.finished) {
+      hint.textContent = state.round_info && state.round_info.ended_early
+        ? "这一场提前结束了。"
+        : "本局结束，可以看结算或再开一桌。";
+      return;
+    }
+    if (state.paused) {
+      hint.textContent = "牌局暂停中，可以聊天，点“继续”接着打。";
+      return;
+    }
+    if (state.awaiting_next) {
+      hint.textContent = "本局已结算，点结算里的“下一局”。";
       return;
     }
 
     const mine = state.pending && state.pending.seat === state.own_seat;
     if (!mine) {
-      hint.textContent = state.pending ? `等 ${state.pending.seat}号 出手` : "等下一手";
+      if (state.pending) {
+        const wait = state.waiting && state.waiting.seat === state.pending.seat
+          ? `（接入中 ${state.waiting.seconds || 0}s）` : "";
+        hint.textContent = `等 ${state.pending.seat}号 出手${wait}`;
+      } else {
+        hint.textContent = "等下一手";
+      }
       return;
     }
 
@@ -301,25 +380,98 @@
     }
   }
 
-  function resultKey(result) {
-    if (!result) return "";
-    return [result.type, result.seat, result.tile, (result.hand || []).join("")].join("|");
+  function chatPhase() {
+    if (!state) return "after";
+    if (state.paused) return "pause";
+    if (state.awaiting_next) return "between";
+    return "after";
   }
 
-  function showResult(result) {
-    if (!result) return;
-    const key = resultKey(result);
+  function renderChat() {
+    const panel = $("chat-panel");
+    const body = $("chat-body");
+    const messages = $("chat-messages");
+    const input = $("chat-input");
+    const send = $("chat-send");
+    const hint = $("chat-hint");
+    if (!state || !state.ok) {
+      messages.replaceChildren();
+      input.disabled = true;
+      send.disabled = true;
+      hint.textContent = "等牌桌";
+      return;
+    }
+    body.classList.toggle("hidden", chatCollapsed);
+    $("btn-chat-toggle").textContent = chatCollapsed ? "展开" : "收起";
+
+    messages.replaceChildren();
+    const rows = state.chat || [];
+    if (!rows.length) {
+      const e = document.createElement("div");
+      e.className = "chat-empty";
+      e.textContent = state.can_chat ? "还没有聊天。暂停或一局结束时可以说话。" : "这桌没有能说话的座位。";
+      messages.appendChild(e);
+    } else {
+      for (const m of rows) {
+        const row = document.createElement("div");
+        row.className = "chat-msg " + (m.role === "user" ? "user" : "buddy");
+        const who = document.createElement("span");
+        who.className = "who";
+        who.textContent = m.role === "user" ? "你" : (state.talker || "牌友");
+        row.appendChild(who);
+        const text = document.createElement("div");
+        text.textContent = m.text || "";
+        row.appendChild(text);
+        messages.appendChild(row);
+      }
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    const canChat = !!state.can_chat;
+    const inChatMoment = !!(state.paused || state.awaiting_next || state.finished || state.result);
+    input.disabled = !canChat || !inChatMoment || busy;
+    send.disabled = input.disabled;
+    if (!canChat) hint.textContent = "这桌没有能说话的座位";
+    else if (!inChatMoment) hint.textContent = "暂停或一局结束时可以聊";
+    else hint.textContent = state.paused ? "暂停中，聊完点“继续”" : "可以聊两句，也可直接看结算";
+    if ((state.paused || state.awaiting_next) && !chatAutoOpened) {
+      chatCollapsed = false;
+      chatAutoOpened = true;
+    }
+    if (!state.paused && !state.awaiting_next && !state.finished) {
+      chatAutoOpened = false;
+    }
+  }
+
+  function resultKey(result, info) {
+    if (!result && !info) return "";
+    const r = result || {};
+    return [info && info.round, info && info.steps, r.type, r.seat, r.tile, (r.hand || []).join("")]
+      .join("|");
+  }
+
+  function showResult() {
+    const result = state.result;
+    const info = state.round_info;
+    if (!result && !info) return;
+    const key = resultKey(result, info);
     if (dismissedResult === key) return;
-    $("modal-title").textContent = result.type === "draw_game"
+    $("modal-title").textContent = result && result.type === "draw_game"
       ? "荒庄"
-      : `${result.seat || "?"}号 胡了`;
-    const settle = result.settle || {};
-    const how = result.zimo ? "自摸" :
+      : info && info.ended_early ? "提前结束"
+      : result && result.type === "win" ? `${result.seat || "?"}号 胡了`
+      : "本局结束";
+    const settle = (result && result.settle) || {};
+    const how = result && (result.zimo ? "自摸" :
       result.rob ? `抢杠（${result.from || "?"}号）` :
       result.bloom ? "后开花" :
-      result.from ? `${result.from}号点炮` : "";
+      result.from ? `${result.from}号点炮` : "");
     $("modal-text").textContent = settle.text ||
-      (result.type === "draw_game" ? "牌墙摸空，本局荒庄。" : (how || "本局结束。"));
+      (info && info.ended_early ? "这一场提前结束，当前局不结算。" :
+        result && result.type === "draw_game" ? "牌墙摸空，本局荒庄。" : (how || "本局结束。"));
+
+    $("modal-broadcast").textContent = (info && info.broadcast) || state.broadcast || "";
+    $("modal-broadcast").style.display = $("modal-broadcast").textContent ? "" : "none";
 
     const fansHost = $("modal-fans");
     fansHost.replaceChildren();
@@ -331,20 +483,49 @@
     }
     $("modal-label").textContent = (settle.fans || []).length ? "番种" : "";
 
+    const payersHost = $("modal-payers");
+    payersHost.replaceChildren();
+    const payers = settle.payers || {};
+    const payerFans = settle.payer_fans || {};
+    for (const [no, val] of Object.entries(payers)) {
+      const tag = document.createElement("span");
+      tag.className = "payer";
+      const own = (payerFans[no] || []).map((x) => x.label).join("、");
+      tag.textContent = `${seatName(Number(no))} 付 ${val} 分${own ? `（${own}）` : ""}`;
+      payersHost.appendChild(tag);
+    }
+    if (!Object.keys(payers).length) {
+      const empty = document.createElement("span");
+      empty.className = "seat-empty";
+      empty.textContent = "没有付款记录";
+      payersHost.appendChild(empty);
+    }
+
+    const boardHost = $("modal-board");
+    boardHost.replaceChildren();
+    if (state.board) {
+      const line = document.createElement("div");
+      line.textContent = "累计：" + [1, 2, 3, 4].map((n) => {
+        const v = Number(state.board[String(n)] || 0);
+        return `${seatName(n)} ${v >= 0 ? "+" : ""}${v}`;
+      }).join("　");
+      boardHost.appendChild(line);
+    }
+
     const handHost = $("modal-hand");
     handHost.replaceChildren();
-    for (const t of result.hand || []) handHost.appendChild(makeTile(t, "small"));
-
+    for (const t of (result && result.hand) || []) handHost.appendChild(makeTile(t, "small"));
     const meldHost = $("modal-melds");
     meldHost.replaceChildren();
-    for (const m of result.melds || []) meldHost.appendChild(makeMeldGroup(m));
-
-    const isWin = result.type === "win";
+    for (const m of (result && result.melds) || []) meldHost.appendChild(makeMeldGroup(m));
+    const isWin = !!(result && result.type === "win");
     for (const id of ["modal-hand-label", "modal-hand", "modal-melds-label", "modal-melds"]) {
       $(id).style.display = isWin ? "" : "none";
     }
-    $("modal-label").textContent = (settle.fans || []).length ? "番种" : "";
 
+    const next = $("modal-next");
+    next.classList.toggle("hidden", !state.awaiting_next);
+    next.disabled = !state.awaiting_next;
     $("modal").classList.remove("hidden");
     dismissedResult = key;
   }
@@ -361,8 +542,10 @@
     dot.className = "dot";
     status.appendChild(dot);
     const text = document.createElement("span");
-    if (state.result) {
-      text.textContent = `本局结束${state.steps != null ? " · 第 " + state.steps + " 步" : ""}`;
+    if (state.finished) {
+      text.textContent = `这一场结束${state.error ? " · " + state.error : ""}`;
+    } else if (state.paused) {
+      text.textContent = "牌局暂停";
     } else if (state.running) {
       text.textContent = `牌桌运行中${state.steps != null ? " · 第 " + state.steps + " 步" : ""}`;
     } else if (state.error) {
@@ -371,6 +554,7 @@
       text.textContent = state.ok ? "牌桌已停" : "正在开桌…";
     }
     status.appendChild(text);
+
     const debugBtn = $("btn-debug");
     if (!state.debug) {
       showAll = false;
@@ -382,22 +566,19 @@
     debugBtn.disabled = !state.debug;
     debugBtn.classList.toggle("on", !!state.debug && showAll);
     debugBtn.textContent = state.debug ? `全牌：${showAll ? "开" : "关"}` : "全牌：关";
-    debugBtn.title = state.debug
-      ? "切换四家手牌可见"
-      : "启动 webui.py 时加 --debug 才能查看";
-    $("btn-resume").disabled = !!state.running || !!state.result;
-    $("btn-quit").disabled = !state.running;
+    debugBtn.title = state.debug ? "切换四家手牌可见" : "启动 webui.py 时加 --debug 才能查看";
 
+    $("btn-resume").disabled = !!state.running && !state.finished;
+    $("btn-quit").disabled = !state.running && state.finished !== true;
+    $("btn-settings").disabled = false;
+
+    renderScorebar();
     if (!state.ok) {
-      $("center-main").textContent = state.message || "正在开桌…";
-      $("center-sub").textContent = "";
-      $("center-wall").replaceChildren();
-      $("center-last").replaceChildren();
-      $("center-log").replaceChildren();
+      renderCenter();
       $("my-hand").replaceChildren();
       $("my-melds").replaceChildren();
-      $("actions").replaceChildren();
-      $("hint").textContent = state.message || "";
+      renderActions();
+      renderChat();
       return;
     }
 
@@ -411,7 +592,8 @@
     renderCenter();
     renderMy();
     renderActions();
-    if (state.result) showResult(state.result);
+    renderChat();
+    if (state.result || state.round_info) showResult();
   }
 
   async function poll() {
@@ -458,14 +640,15 @@
     } finally {
       busy = false;
       renderActions();
+      renderChat();
     }
   }
 
   async function pollNow() {
-    if (polling) return;
     try {
       const res = await fetch("/api/state", { cache: "no-store" });
       state = await res.json();
+      lastStateKey = "";
       render();
     } catch (err) {
       toast("刷新失败：" + err);
@@ -487,22 +670,132 @@
     submitAction(found.index);
   }
 
-  async function newGame() {
+  function resetTableState() {
     dismissedResult = "";
+    lastStateKey = "";
+    chatAutoOpened = false;
+    chatCollapsed = true;
     $("modal").classList.add("hidden");
-    await post("/api/new", {});
-    toast("新一桌开好了，等牌局落盘。");
+  }
+
+  function openSettings() {
+    if (state && state.config) {
+      $("set-players").value = state.config.players || "1=human,2=llm,3=random,4=random";
+      $("set-rounds").value = state.config.rounds || 1;
+      $("set-dealer").value = state.config.dealer || "";
+      $("set-base").value = state.config.base ?? 1;
+      $("set-fan-cap").value = state.config.fan_cap ?? 8;
+      $("set-seed").value = state.config.seed ?? "";
+      $("set-steps").value = state.config.steps ?? 0;
+      $("set-agent-wait").value = state.config.agent_wait ?? 0;
+      $("set-offline").value = state.config.offline ? "1" : "0";
+    }
+    $("settings-modal").classList.remove("hidden");
+  }
+
+  async function startNewGame() {
+    const body = {
+      players: $("set-players").value.trim(),
+      rounds: Number($("set-rounds").value || 1),
+      dealer: $("set-dealer").value.trim(),
+      base: Number($("set-base").value || 1),
+      fan_cap: Number($("set-fan-cap").value || 8),
+      seed: $("set-seed").value.trim(),
+      steps: Number($("set-steps").value || 0),
+      agent_wait: Number($("set-agent-wait").value || 0),
+      offline: $("set-offline").value === "1",
+    };
+    if (!body.players) body.players = "1=human,2=llm,3=random,4=random";
+    $("settings-modal").classList.add("hidden");
+    resetTableState();
+    const data = await post("/api/new", body);
+    if (data && data.ok) toast("新桌开好了，等牌局落盘。");
   }
 
   async function resumeGame() {
-    dismissedResult = "";
-    $("modal").classList.add("hidden");
-    await post("/api/resume", {});
+    resetTableState();
+    const data = await post("/api/resume", {});
+    if (data && data.ok) toast("接上存档了。");
   }
 
   async function quitGame() {
-    await post("/api/quit", {});
-    toast("牌桌已停。");
+    const data = await post("/api/quit", {});
+    if (data) toast("牌桌已停。");
+  }
+
+  async function togglePause() {
+    if (!state) return;
+    if (state.paused) {
+      await post("/api/resume-play", {});
+      return;
+    }
+    const data = await post("/api/pause", {});
+    if (data && data.ok) toast("牌先停着，可以聊天。");
+  }
+
+  async function endGame() {
+    if (!confirm("提前结束这一场？当前这局不结算。")) return;
+    const data = await post("/api/end", {});
+    if (data && data.ok) toast("已请求提前结束。");
+  }
+
+  async function nextRound() {
+    const data = await post("/api/next-round", {});
+    if (data && data.ok) {
+      $("modal").classList.add("hidden");
+      dismissedResult = "";
+      toast("下一局开始。");
+    }
+  }
+
+  async function sendChat() {
+    if (!state || !state.can_chat) return;
+    const input = $("chat-input");
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    const data = await post("/api/chat", { text: text, phase: chatPhase() });
+    if (data && data.ok) {
+      chatCollapsed = false;
+      chatAutoOpened = true;
+    }
+  }
+
+  async function openUndo() {
+    $("undo-frames").replaceChildren();
+    try {
+      const res = await fetch("/api/snapshots", { cache: "no-store" });
+      const snap = await res.json();
+      if (!snap.frames || !snap.frames.length) {
+        const e = document.createElement("div");
+        e.className = "chat-empty";
+        e.textContent = "这一场还没有快照。";
+        $("undo-frames").appendChild(e);
+      } else {
+        for (const f of snap.frames.slice().reverse()) {
+          const row = document.createElement("div");
+          row.className = "frame-row";
+          const label = document.createElement("span");
+          label.textContent = `第 ${f.step} 步 · ${f.next || "?"} ${f.seat || "?"}号 · 牌墙 ${f.wall} 张`;
+          row.appendChild(label);
+          const btn = document.createElement("button");
+          btn.textContent = "回到这手之前";
+          btn.addEventListener("click", async () => {
+            const r = await post("/api/rollback", { name: f.name });
+            if (r && r.ok) {
+              $("undo-modal").classList.add("hidden");
+              resetTableState();
+              toast("已回退，牌局从这一手之前接上。");
+            }
+          });
+          row.appendChild(btn);
+          $("undo-frames").appendChild(row);
+        }
+      }
+    } catch (err) {
+      toast("取快照失败：" + err);
+    }
+    $("undo-modal").classList.remove("hidden");
   }
 
   function toggleDebug() {
@@ -513,14 +806,38 @@
   }
 
   $("btn-debug").addEventListener("click", toggleDebug);
-  $("btn-new").addEventListener("click", newGame);
+  $("btn-pause").addEventListener("click", togglePause);
+  $("btn-end").addEventListener("click", endGame);
+  $("btn-next").addEventListener("click", nextRound);
+  $("btn-undo").addEventListener("click", openUndo);
+  $("btn-settings").addEventListener("click", openSettings);
   $("btn-resume").addEventListener("click", resumeGame);
   $("btn-quit").addEventListener("click", quitGame);
-  $("modal-new").addEventListener("click", newGame);
+  $("btn-chat-toggle").addEventListener("click", () => {
+    chatCollapsed = !chatCollapsed;
+    lastStateKey = "";
+    renderChat();
+  });
+  $("chat-send").addEventListener("click", sendChat);
+  $("chat-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") sendChat();
+  });
+  $("settings-cancel").addEventListener("click", () => $("settings-modal").classList.add("hidden"));
+  $("settings-start").addEventListener("click", startNewGame);
+  $("undo-cancel").addEventListener("click", () => $("undo-modal").classList.add("hidden"));
+  $("modal-next").addEventListener("click", nextRound);
   $("modal-close").addEventListener("click", () => $("modal").classList.add("hidden"));
+  $("modal-new").addEventListener("click", () => {
+    $("modal").classList.add("hidden");
+    openSettings();
+  });
 
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") $("modal").classList.add("hidden");
+    if (e.key === "Escape") {
+      $("modal").classList.add("hidden");
+      $("settings-modal").classList.add("hidden");
+      $("undo-modal").classList.add("hidden");
+    }
   });
 
   poll();

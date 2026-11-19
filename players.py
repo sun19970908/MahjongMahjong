@@ -154,7 +154,8 @@ class ExternalPlayer(BasePlayer):
     """
 
     def __init__(self, seat: int, root: Path | str | None = None, poll: float = 0.05,
-                 wait: float = 0.0, on_wait: Callable[[float], None] | None = None) -> None:
+                 wait: float = 0.0, on_wait: Callable[[float], None] | None = None,
+                 cancel_event=None) -> None:
         super().__init__(seat)
         self.dir = Path(root or DEFAULT_SEAT_ROOT) / seats_mod.seat_dir(seat)
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -163,7 +164,8 @@ class ExternalPlayer(BasePlayer):
         self.poll = poll
         self.wait = wait
         self.round = 0
-        self.on_wait = on_wait          # 等待期间每秒回一次（给 TUI 报个"已等 N 秒"）
+        self.on_wait = on_wait
+        self.cancel_event = cancel_event
 
     # ---- 文件 ----
     def _pending_path(self) -> Path:
@@ -195,6 +197,9 @@ class ExternalPlayer(BasePlayer):
         t0 = time.monotonic()
         beat = t0
         while True:
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                self._pending_path().unlink(missing_ok=True)
+                raise EndEarly()
             if (self.dir / "give-up").exists():
                 (self.dir / "give-up").unlink()
                 self._pending_path().unlink(missing_ok=True)
@@ -362,12 +367,17 @@ class Table:
 
 def build_players(plans: list[SeatPlan], *, seats: int = 4,
                   llm_factory: Callable[[SeatPlan], BasePlayer] | None = None,
+                  human_factory: Callable[[SeatPlan], BasePlayer] | None = None,
                   rng: random.Random | None = None) -> Table:
-    """按计划摆人。别的类型自己会造，llm 那张椅子由外面递进来的工厂盖（要网、要模型）。"""
+    """按计划摆人。别的类型自己会造，llm 那张椅子由外面递进来的工厂盖（要网、要模型）。
+
+    human 也一样：TUI 用键盘、网页用 HTTP，内核不认具体 UI，只认外面递进来的
+    human_factory；不传时才退回 players.HumanPlayer（兼容老脚本）。
+    """
     made: list[BasePlayer] = []
     for plan in plans:
         if plan.kind == "human":
-            made.append(HumanPlayer(plan.seat))
+            made.append(human_factory(plan) if human_factory else HumanPlayer(plan.seat))
         elif plan.kind == "llm":
             if llm_factory is None:
                 raise RuntimeError("这桌要坐牌友，但没给造牌友的工厂")
