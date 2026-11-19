@@ -7,14 +7,14 @@
     输了加一番：庄家 点炮（被抢杠算点炮） 闷（未开门无附露，闭门听之后杠仍然是闷）
                 手把一 流泪（被抢杠或者杠后马上点炮）
 
-设计口径（一手算一个总番，番种逐条拆开相加）：
+设计口径（赢家番三家共担，输家番自己付自己的）：
     * 每个番种 1 番，全部叠加；四归一看「整手这个牌种一共几张」，
       杠、叉、吃都算进来，几种牌各凑四张就叠几番；
     * 三红中 1 番；红中凑齐四张时再叠一个四归一，共 2 番；
-    * 闷、庄家、手把一、点炮、流泪这些输家番，一手只加一次，
-      不按付款人数重复（三家都闷也只有 1 番闷）；
-    * 三清本身 1 番，三家全闷时自然叠上那 1 番闷，共 2 番；
-    * 分数 = 底分 × 2^总番（封顶 8 番）：自摸三家同额付，点炮只有那家付。
+    * 三清本身 1 番，三家全闷时统一再记 1 番闷，共 2 番；
+    * 闷、庄家、点炮、手把一、流泪是输家自己的番：谁身上有，就只加在那个人
+      这一笔上（庄家付款只他自己多付，三家都闷也只有三清那 1 番是共同承担的）；
+    * 分数 = 底分 × 2^番（封顶 8 番）：自摸各家按自己的番付，点炮只有那家付。
 """
 
 from __future__ import annotations
@@ -96,13 +96,14 @@ class Context:
 
 @dataclass
 class Settlement:
-    lines: list[Fan] = field(default_factory=list)           # 赢家番 + 输家番
+    lines: list[Fan] = field(default_factory=list)           # 赢家番（三家共同承担）
     total: int = 0
-    points: int = 0                                          # 每个付款人各付多少
+    points: int = 0                                          # 赢家总共收多少
     payers: dict[int, int] = field(default_factory=dict)     # 引擎下标 → 该付多少
+    payer_lines: dict[int, list[Fan]] = field(default_factory=dict)  # 各家自己的输家番
 
     def text(self) -> str:
-        """「自摸、闷、三清 = 3 番，8 分」，重复的番合并成 ×N。"""
+        """「自摸、四归一 = 2 番；2号（庄家）8 分，1号 4 分…」，重复的番合并成 ×N。"""
         parts: list[str] = []
         counts: dict[str, int] = {}
         for f in self.lines:
@@ -111,7 +112,12 @@ class Settlement:
                 counts[f.label] = 0
             counts[f.label] += f.per
         detail = "、".join(f"{p}×{counts[p]}" if counts[p] > 1 else p for p in parts) or "无番"
-        return f"{detail} = {self.total} 番，{self.points} 分"
+        tail = []
+        for seat, pts in self.payers.items():
+            own = self.payer_lines.get(seat) or []
+            tag = f"（{'、'.join(f.label for f in own)}）" if own else ""
+            tail.append(f"{seat + 1}号{tag} {pts} 分")
+        return f"{detail} = {self.total} 番；" + "，".join(tail) if tail else f"{detail} = {self.total} 番"
 
     def to_dict(self) -> dict:
         return {
@@ -119,6 +125,8 @@ class Settlement:
             "total": self.total,
             "points": self.points,
             "payers": {str(k): v for k, v in self.payers.items()},
+            "payer_fans": {str(k): [{"code": f.code, "label": f.label, "fan": f.per}
+                                    for f in v] for k, v in self.payer_lines.items()},
             "text": self.text(),
         }
 
@@ -129,6 +137,7 @@ def points_for(fan: int, base: int = BASE_POINTS, cap: int = FAN_CAP) -> int:
 
 
 def _win_lines(ctx: Context) -> list[Fan]:
+    """赢家番：三家共同承担；三清时连那 1 番闷也记在这里。"""
     out: list[Fan] = []
 
     def add(code: str) -> None:
@@ -158,38 +167,43 @@ def _win_lines(ctx: Context) -> list[Fan]:
         add("back_bloom")
     if ctx.sanqing:
         add("sanqing")
+        add("men")                          # 三清 = 三清 1 + 闷 1，只记一次
     if ctx.hai and ctx.zimo:
         add("haidi")
     return out
 
 
-def _lose_lines(payers: list[Payer]) -> list[Fan]:
-    """输家番：一手每类只加一次，不管几个付款人。"""
+def _own_lines(p: Payer, sanqing: bool) -> list[Fan]:
+    """某个付款人自己的输家番：只落在他这一笔上，不摊给别家。"""
     out: list[Fan] = []
 
     def add(code: str) -> None:
         out.append(FAN_BY_CODE[code])
 
-    if any(p.dealer for p in payers):
+    if p.dealer:
         add("dealer")
-    if any(p.discard for p in payers):
+    if p.discard:
         add("discard")
-    if any(p.men for p in payers):
+    if p.men and not sanqing:               # 三清已经统一给过闷，不再按人重复
         add("men")
-    if any(p.hand_tiles == 1 for p in payers):
+    if p.hand_tiles == 1:
         add("hand_one")
-    if any(p.tears for p in payers):
+    if p.tears:
         add("tears")
     return out
 
 
 def settle(ctx: Context, *, base: int = BASE_POINTS, cap: int = FAN_CAP) -> Settlement:
-    """一手算一个总番：赢家番 + 输家番逐条相加，再按番算分。"""
+    """赢家番三家共担，各家再叠自己的输家番，分别算钱。"""
     s = Settlement()
-    s.lines = _win_lines(ctx) + _lose_lines(ctx.payers)
+    s.lines = _win_lines(ctx)
     s.total = sum(f.per for f in s.lines)
-    s.points = points_for(s.total, base, cap)
-    s.payers = {p.seat: s.points for p in ctx.payers}
+    for p in ctx.payers:
+        own = _own_lines(p, ctx.sanqing)
+        s.payer_lines[p.seat] = own
+        pts = points_for(s.total + sum(f.per for f in own), base, cap)
+        s.payers[p.seat] = pts
+        s.points += pts
     return s
 
 
@@ -207,43 +221,48 @@ def _selftest() -> int:
     def codes(s: Settlement) -> list[str]:
         return [f.code for f in s.lines]
 
+    def own(s: Settlement, seat: int) -> list[str]:
+        return [f.code for f in s.payer_lines.get(seat, ())]
+
     base = dict(winner=2, dealer=0, seats=4)
     others = [Payer(i) for i in (0, 1, 3)]
 
     s = settle(Context(**base, zimo=True, payers=others))
-    case("自摸", (codes(s), s.total, s.points), (["zimo"], 1, 2))
-    case("自摸三家同额付", s.payers, {0: 2, 1: 2, 3: 2})
+    case("自摸", (codes(s), s.total), (["zimo"], 1))
+    case("自摸三家同额付", (s.payers, s.points), ({0: 2, 1: 2, 3: 2}, 6))
 
     s = settle(Context(**base, zimo=True, closed_ting=True, payers=others))
-    case("闭门自摸 = 闭门听 + 自摸", (codes(s), s.total, s.points), (["zimo", "closed_ting"], 2, 4))
+    case("闭门自摸 = 闭门听 + 自摸", (codes(s), s.total, s.payers), (["zimo", "closed_ting"], 2, {0: 4, 1: 4, 3: 4}))
 
     s = settle(Context(**base, zimo=True, closed_ting=True, sanqing=True,
                        payers=[Payer(i, men=True) for i in (0, 1, 3)]))
     case("自摸 + 三清 = 自摸 + 闷 + 三清", (codes(s), s.total), (["zimo", "closed_ting", "sanqing", "men"], 4))
+    case("三清时闷不再按人重复", [own(s, 0), own(s, 1), own(s, 3)], [[], [], []])
 
     s = settle(Context(**base, zimo=True, sanqing=True,
                        payers=[Payer(i, men=True) for i in (0, 1, 3)]))
-    case("三家都闷，闷只加一次", (codes(s), s.total), (["zimo", "sanqing", "men"], 3))
+    case("三家都闷，闷只加一次", (codes(s), s.total, s.payers), (["zimo", "sanqing", "men"], 3, {0: 8, 1: 8, 3: 8}))
 
     s = settle(Context(**base, closed_ting=True,
                        payers=[Payer(0, discard=True, men=True)]))
-    case("闷点炮给闭门听 = 闭门听 + 点炮 + 闷", (codes(s), s.total, s.points),
-         (["closed_ting", "discard", "men"], 3, 8))
+    case("闷点炮给闭门听 = 闭门听 + 点炮 + 闷",
+         (codes(s), own(s, 0), s.total + 2, s.payers[0]), (["closed_ting"], ["discard", "men"], 3, 8))
 
     s = settle(Context(**base, payers=[Payer(0, dealer=True, discard=True)]))
-    case("庄家点炮", (codes(s), s.total), (["dealer", "discard"], 2))
+    case("庄家点炮：庄家番只算他这一笔", (codes(s), own(s, 0), s.payers), ([], ["dealer", "discard"], {0: 4}))
 
     s = settle(Context(**base, payers=[Payer(0, discard=True, tears=True)]))
-    case("抢杠 = 点炮 + 流泪", (codes(s), s.total), (["discard", "tears"], 2))
-
-    s = settle(Context(**base, payers=[Payer(0, discard=True, tears=True)]))
-    case("抢杠二番 4 分", s.points, 4)
+    case("抢杠 = 点炮 + 流泪", (own(s, 0), s.payers[0]), (["discard", "tears"], 4))
 
     s = settle(Context(**base, payers=[Payer(0, discard=True, hand_tiles=1)]))
-    case("输家手把一", (codes(s), s.total), (["discard", "hand_one"], 2))
+    case("输家手把一", own(s, 0), ["discard", "hand_one"])
 
     s = settle(Context(**base, payers=[Payer(1, discard=True)]))
     case("点炮只有那家付", s.payers, {1: 2})
+
+    s = settle(Context(**base, zimo=True,
+                       payers=[Payer(0, dealer=True), Payer(1), Payer(3)]))
+    case("庄家是付款人时只他多付", (s.total, s.payers), (1, {0: 4, 1: 2, 3: 2}))
 
     four = [0] * KINDS
     four[0] = four[1] = 4

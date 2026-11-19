@@ -901,7 +901,7 @@ def _selftest() -> int:
     case("抢杠的选项里有胡", [a.kind for a in d.legal], ["win", "pass"])
     g.apply(next(a for a in d.legal if a.kind == "win"))
     case("抢杠胡成立", (g.result["type"], g.result["seat"], g.result["rob"]), ("win", 1, True))
-    codes = [f["code"] for f in g.result["settle"]["fans"]]
+    codes = [f["code"] for f in next(iter(g.result["settle"]["payer_fans"].values()))]
     case("抢杠结算：点炮和流泪都在", ("discard" in codes, "tears" in codes), (True, True))
     case("没报听的人抢不了杠", rob_setup(listen=False).phase, "kan_draw")
 
