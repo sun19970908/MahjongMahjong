@@ -119,7 +119,7 @@ def tileset_css() -> str:
     return "\n".join(out)
 
 
-def render(state: dict, *, me_no: int | None) -> str:
+def render(state: dict, *, me_no: int | None, refresh: float = 0.0) -> str:
     cfg = state.get("cfg") or {}
     gs = state.get("game") or {}
     meta = state.get("meta") or {}
@@ -183,7 +183,9 @@ def render(state: dict, *, me_no: int | None) -> str:
                      f'<div class="meta">番种：{html.escape(fans)}</div></div>')
 
     parts.append("</div>")
-    return f"""<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>麻将桌</title>
+    refresh_meta = (f'<meta http-equiv="refresh" content="{refresh:g}">'
+                    if refresh > 0 else "")
+    return f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">{refresh_meta}<title>麻将桌</title>
 <style>{CSS}
 {tileset_css()}</style></head><body>{''.join(parts)}</body></html>"""
 
@@ -194,7 +196,10 @@ def main() -> int:
     ap.add_argument("--state", default=str(STATE_PATH))
     ap.add_argument("--seat", type=int, default=None, help="从几号视角排（默认按存档里的你）")
     ap.add_argument("--watch", type=float, default=0.0, help="每隔几秒重画一次")
+    ap.add_argument("--refresh", type=float, default=None,
+                    help="浏览器自动刷新秒数；不给就跟着 --watch（--watch 为 0 时不刷）")
     args = ap.parse_args()
+    refresh = args.refresh if args.refresh is not None else max(args.watch, 0.0)
 
     while True:
         try:
@@ -205,8 +210,14 @@ def main() -> int:
         me = args.seat
         if me is None and state.get("meta", {}).get("you") is not None:
             me = int(state["meta"]["you"])
-        Path(args.out).write_text(render(state, me_no=me), encoding="utf-8")
-        print(f"写好 {args.out}")
+        out = Path(args.out)
+        tmp = out.with_name(out.name + ".tmp")
+        tmp.write_text(render(state, me_no=me, refresh=refresh), encoding="utf-8")
+        try:
+            tmp.replace(out)                 # 先写临时文件再换，浏览器刷新时不会读到半截
+        except OSError:
+            out.write_text(render(state, me_no=me, refresh=refresh), encoding="utf-8")
+        print(f"写好 {args.out}" + (f"（浏览器每 {refresh:g} 秒刷新）" if refresh > 0 else ""))
         if args.watch <= 0:
             return 0
         time.sleep(args.watch)
