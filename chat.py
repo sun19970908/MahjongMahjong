@@ -1,7 +1,7 @@
 """牌友单聊窗口：只拼规则、人设、笔记，工具只有「改笔记」。
 
 跟 play.py 完全分开：不带牌桌、不带手牌、不带打牌工具，独一份对话历史。
-它想改笔记就自己改牌友笔记.md，改完接着跟你说话。
+它想改笔记就自己改牌友笔记.md，改完接着跟你说话；这里不限制篇幅、不限制改几次。
 
 用法：python chat.py        （空行回车退出）
 """
@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 
 from game import _tool
-from llm_player import StrataClient
+from llm_player import StrataClient, _room_for
 
 HERE = Path(__file__).resolve().parent
 RULES_PATH = HERE / "规则.txt"
@@ -78,14 +78,14 @@ def apply_note(path: Path, args: dict) -> str:
     else:
         return f"不认识的做法 {mode}"
 
-    path.write_text(body[:4000].rstrip() + "\n", encoding="utf-8")
-    return "笔记改好了，现在是：\n" + body[-1200:]
+    path.write_text(body.rstrip() + "\n", encoding="utf-8")
+    return "笔记改好了，现在是：\n" + body
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="strata-lowthink")
-    ap.add_argument("--budget", type=int, default=3000, help="思考预算 token")
+    ap.add_argument("--budget", type=int, default=6000, help="思考预算 token；改笔记按这个预算放开")
     args = ap.parse_args()
 
     client = StrataClient()
@@ -102,9 +102,10 @@ def main() -> int:
             break
         messages.append({"role": "user", "content": line})
 
-        for _ in range(3):                     # 改完笔记再回一句，最多三轮
+        while True:                            # 想改几次就改几次，不设轮数上限
             r = client.chat(messages, model=args.model, tools=TOOLS,
-                            tool_choice="auto", reasoning_budget=args.budget)
+                            tool_choice="auto", max_tokens=_room_for(args.budget),
+                            reasoning_budget=args.budget)
             if r.tool_call and r.tool_call.get("name") == "edit_note":
                 call_id = f"note_{len(messages)}"
                 messages.append({
