@@ -26,8 +26,10 @@ NOTE_TOOL = _tool(
     "edit_note",
     "改你的笔记（牌友笔记.md）。mode=append 往末尾加一条，写 new_string；"
     "mode=replace 把 old_string 那一小段原文换成 new_string，old_string 必须唯一；"
-    "找不到或出现多次都不会改，要全改就用 replace_all。",
-    {"mode": {"type": "string", "enum": ["append", "replace", "replace_all"]},
+    "mode=replace_all 把 old_string 的所有出现都换掉；"
+    "mode=replace_tail 从 old_string 第一次出现处一直改到文件末尾；"
+    "mode=overwrite 用 new_string 整篇覆盖。找不到也不拦，挑能用的方式改。",
+    {"mode": {"type": "string", "enum": ["append", "replace", "replace_all", "replace_tail", "overwrite"]},
      "old_string": {"type": "string"},
      "new_string": {"type": "string"}},
     ["mode"])
@@ -49,7 +51,7 @@ def system_prompt() -> str:
 
 
 def apply_note(path: Path, args: dict) -> str:
-    """edit_note 落地：append / replace / replace_all，规则跟牌桌上那套一样。"""
+    """edit_note 落地：append / replace / replace_all / replace_tail / overwrite。"""
     mode = str(args.get("mode") or "").strip().lower()
     old = str(args.get("old_string") or "")
     new = str(args.get("new_string") or args.get("text") or "")
@@ -71,10 +73,20 @@ def apply_note(path: Path, args: dict) -> str:
             return "replace 得给我 old_string（要改的那段原文）"
         n = body.count(old)
         if n == 0:
-            return f"笔记里找不到这段原文，没动：{old[:80]}"
+            return ("笔记里找不到这段原文，没动："
+                    f"{old[:80]}。要整段改到末尾用 mode=replace_tail，整篇重写用 mode=overwrite")
         if n > 1 and mode != "replace_all":
             return f"这段在笔记里出现 {n} 次，不唯一，没动（要全改就用 replace_all）"
         body = body.replace(old, new) if mode == "replace_all" else body.replace(old, new, 1)
+    elif mode == "replace_tail":
+        if not old:
+            return "replace_tail 得给我 old_string（从哪句开始改到末尾）"
+        idx = body.find(old)
+        if idx < 0:
+            return f"笔记里找不到这个起点，没动：{old[:80]}。整篇重写可以用 mode=overwrite"
+        body = body[:idx] + new
+    elif mode == "overwrite":
+        body = new
     else:
         return f"不认识的做法 {mode}"
 
