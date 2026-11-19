@@ -713,6 +713,12 @@ class LLMPlayer:
                 if phase == "pause" else
                 "【散场闲聊】牌局散了，现在是闲聊时间。就照你自己的性子说话，"
                 "可以聊刚才那手牌，也可以聊别的。\n")
+        # 聊天也把这一局的临时笔记带上：局中聊完接着打，散场聊完才好把经验写进长期笔记
+        soft = self._read_soft_notes()
+        if soft:
+            head += f"\n【本局临时笔记】\n{soft}\n"
+        if phase == "after":
+            head += "\n（这一局的经验要留下，就调 edit_note 写进长期笔记：target=long；临时笔记下一局会清空。）\n"
         first = not self._chatted
         said = (head + text) if first else text
         self._chatted = True
@@ -1017,7 +1023,7 @@ def _selftest() -> int:
     from game import GameConfig
 
     # 造一个"轮到你出牌"的 Decision
-    g = Game(GameConfig(seats=3, seed=11))
+    g = Game(GameConfig(seats=3, seed=11, dealer=0))
     g.start()
     d_draw = g.pending()   # 0 号摸牌，只有一个选项
     g.apply(Action("draw"))
@@ -1239,6 +1245,17 @@ def _selftest() -> int:
     pT.chat("记一下：他老打 m9", phase="pause", budget=600)
     case("临时笔记写进去了", "他老打 m9" in temp.read_text(encoding="utf-8"), True)
     case("临时笔记贴到牌桌上", "【临时笔记】" in pT._user_prompt(d, 3000), True)
+
+    fcC = _FakeClient([ChatResult(content="知道")])
+    pC = LLMPlayer(fcC, 0, log_path=None, soft_notes_path=temp)
+    pC.chat("中场说两句", phase="pause")
+    case("中场聊天也带上临时笔记", "【本局临时笔记】" in fcC.calls[0]["messages"][-1]["content"], True)
+
+    fcA = _FakeClient([ChatResult(content="记下了")])
+    pA = LLMPlayer(fcA, 0, log_path=None, soft_notes_path=temp)
+    pA.chat("散场聊两句", phase="after")
+    case("散场聊天也带上临时笔记", "【本局临时笔记】" in fcA.calls[0]["messages"][-1]["content"], True)
+    case("散场提醒写长期笔记", "target=long" in fcA.calls[0]["messages"][-1]["content"], True)
 
     noteL = Path(tempfile.gettempdir()) / "_mahjong_note_long.md"
     noteL.write_text("", encoding="utf-8")
