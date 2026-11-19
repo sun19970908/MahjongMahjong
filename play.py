@@ -213,6 +213,40 @@ def settle_block(result: dict | None) -> list[str]:
     return out
 
 
+def round_broadcast(rnd: int, rounds: int, res: dict, board: dict[int, int],
+                    names: dict[int, str], buddy: int | None,
+                    ended_early: bool = False) -> str:
+    """每局收场给牌友的播报：谁胡的、怎么胡的、怎么结算、累计多少。"""
+    head = f"【第{rnd}/{rounds}局播报】"
+    if ended_early:
+        head += "提前结束，这一局没结算。"
+    elif not res:
+        head += "这一局没有结果。"
+    elif res.get("type") == "draw_game":
+        head += "荒庄，牌墙摸空。"
+    else:
+        seat = res.get("seat")
+        who = names.get(seat) or f"{seats_mod.label(seat)}号"
+        tile = face(res.get("tile"))[0].strip() if res.get("tile") else "?"
+        if res.get("zimo"):
+            how = "自摸"
+        elif res.get("rob"):
+            how = f"抢杠，{seats_mod.label(res.get('from'))}号"
+        else:
+            how = f"{seats_mod.label(res.get('from'))}号点炮"
+        head += f"{who} 胡 {tile}（{how}）。"
+    settle = res.get("settle") or {}
+    if settle.get("text"):
+        head += f"结算：{settle['text']}。"
+    if board:
+        head += "累计：" + "，".join(
+            f"{names.get(s) or (seats_mod.label(s) + '号')} {board[s]:+d}"
+            for s in range(len(board)))
+        if buddy is not None:
+            head += f"；你 {board.get(buddy, 0):+d}。"
+    return head
+
+
 def draw_screen(text: str) -> None:
     if sys.stdout.isatty():
         if VT_OK:
@@ -515,6 +549,9 @@ def main() -> int:
             else:
                 print("\n 这一局打完了，下一局还没开。想跟牌友聊两句就直接打字，空行回车结束。")
                 print(" （现在只能追加长期笔记；想直接收场就打 /e，进入终场聊天）")
+            bcast = round_broadcast(rnd + 1, rounds, res, board, names, buddy, ended_early)
+            print(f"\n 播报：{bcast}", flush=True)
+            print(f" {names.get(buddy) or ''}：{talker.chat(bcast, phase=phase)}", flush=True)
             while True:
                 try:
                     line = input(" 你：").strip()
