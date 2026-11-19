@@ -294,9 +294,14 @@ def main() -> int:
 
     if saved:
         game, meta = saved
-        you_no = int(meta["you"])                      # 存档里存的是座位号（1 起）
-        buddy_no = int(meta["buddy"])
-        agent_no = None if meta.get("agent") is None else int(meta["agent"])
+
+        def old_seat(v):
+            """老存档是 0 基座位：0 号=你、1 号=牌友、2 号=接入位，读进来先抬成 1 基。"""
+            return None if v is None else (int(v) + 1 if int(v) < seats_mod.FIRST_SEAT else int(v))
+
+        you_no = old_seat(meta.get("you"))
+        buddy_no = old_seat(meta.get("buddy"))
+        agent_no = old_seat(meta.get("agent"))
         plans = plan_from_flags(seats=game.cfg.seats, human=you_no,
                                 buddy=buddy_no, agent=agent_no)
         if any((args.seat != 1, args.buddy, args.agent, args.players)):

@@ -25,6 +25,9 @@ TILES_DIR = HERE / "tiles"
 
 SUIT_COLOR = {"m": "#b3261e", "p": "#1d4ed8", "s": "#0f7b3a", "z": "#c026d3"}
 SUIT_NAME = {"m": "萬", "p": "餅", "s": "條", "z": ""}
+TAG_NAME = {"you": "你", "buddy": "牌友", "agent": "接入"}
+PHASE_NAME = {"idle": "待开局", "draw": "摸牌", "discard": "出牌", "react": "等反应",
+              "kan_draw": "杠后补张", "ting_declare": "报听", "ended": "收局"}
 
 RANK = ["一", "二", "三", "四", "五", "六", "七", "八", "九"]
 
@@ -39,10 +42,9 @@ def _parts(tid: str) -> tuple[str, str]:
 
 def tile_html(tid: str, *, small: bool = False) -> str:
     """一张牌：有贴图用贴图，没有就用字画。"""
-    png = TILES_DIR / f"{tid}.png"
     cls = " tile small" if small else " tile"
-    if png.exists():
-        return f'<span class="{cls} img" style="background-image:url(tiles/{tid}.png)"></span>'
+    if (TILES_DIR / f"{tid}.png").exists():
+        return f'<span class="{cls} img f-{tid}"></span>'
     num, suit = _parts(tid)
     color = SUIT_COLOR.get(tid[0], "#333")
     if tid.startswith("z"):
@@ -89,17 +91,32 @@ h1{font-size:20px;margin:0 0 6px;font-weight:600}
        background:#2f6f4c;color:#dff}
 .badge.dealer{background:#8a5a00}
 .tile{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;
-      width:34px;height:46px;margin:2px;border-radius:6px;background:#fdfaf0;color:#222;
-      box-shadow:0 2px 0 #cfc6ad;font-size:15px;vertical-align:top}
-.tile.small{width:26px;height:35px;font-size:12px;box-shadow:0 1px 0 #cfc6ad}
-.tile.img{background-size:cover;background-position:center}
+      width:38px;height:52px;margin:2px;border-radius:6px;background:#fdfaf0;color:#222;
+      box-shadow:0 2px 0 #cfc6ad;font-size:16px;vertical-align:top}
+.tile.small{width:28px;height:38px;font-size:12px;box-shadow:0 1px 0 #cfc6ad}
+.tile.img{background-size:contain;background-repeat:no-repeat;background-position:center;
+          background-color:#fdfaf0}
+.hand{display:flex;flex-wrap:wrap;margin:4px 0 8px}
 .tile b{line-height:1;font-weight:700}
 .tile i{font-style:normal;font-size:11px;line-height:1}
 .empty{color:#6f9b82}
-.river{line-height:1}
+.river{line-height:1.6;font-size:13px}
+.lbl{color:#7fae92;margin-right:6px}
 .settle{background:#0d2c1d;border:1px solid #2f6f4c;border-radius:10px;padding:10px 12px;margin-top:12px}
 .settle h2{font-size:15px;margin:0 0 6px;color:#ffd479}
 """
+
+
+def tileset_css() -> str:
+    """把 tiles/*.png 烘进 CSS：每种牌只 embeds 一次，HTML 单独拿走也能显示。"""
+    import base64
+    if not TILES_DIR.exists():
+        return ""
+    out = []
+    for png in sorted(TILES_DIR.glob("*.png")):
+        data = base64.b64encode(png.read_bytes()).decode("ascii")
+        out.append(f".f-{png.stem}{{background-image:url(data:image/png;base64,{data})}}")
+    return "\n".join(out)
 
 
 def render(state: dict, *, me_no: int | None) -> str:
@@ -124,9 +141,9 @@ def render(state: dict, *, me_no: int | None) -> str:
             names[int(meta[key])] = key
 
     parts = ['<div class="wrap">', "<h1>麻将桌</h1>",
-             f'<div class="meta">第 {meta.get("steps", 0)} 步 · 阶段 {gs.get("phase", "?")} · '
-             f'牌墙 {len(wall)} 张 · 明牌 {wall[-1] if wall else "—"}</div>',
-             '<div class="table">']
+             f'<div class="meta">第 {meta.get("steps", 0)} 步 · '
+             f'{PHASE_NAME.get(gs.get("phase", ""), gs.get("phase", "?"))} · '
+             f'牌墙 {len(wall)} 张</div>', '<div class="table">']
 
     # 从自己开始绕一圈，看着顺眼
     start = (me_no or 1) - 1
@@ -136,8 +153,12 @@ def render(state: dict, *, me_no: int | None) -> str:
         badges = []
         if s == dealer:
             badges.append('<span class="badge dealer">庄</span>')
-        if dice:
-            badges.append(f'<span class="badge">骰 {dice[0]}+{dice[1]}={dice[2]}</span>')
+            if dice:
+                badges.append(f'<span class="badge">骰 {dice[0]}+{dice[1]}={dice[2]}</span>')
+        if s == dealer and wall:
+            last = wall[-1]
+            num, suit = _parts(last)
+            badges.append(f'<span class="badge">明牌 {num}{suit}</span>')
         if ting.get(str(s)):
             badges.append('<span class="badge">报听</span>')
         if kans.get(str(s)):
@@ -145,11 +166,11 @@ def render(state: dict, *, me_no: int | None) -> str:
         if dead.get(str(s)):
             badges.append('<span class="badge">已弃胡</span>')
         tag = names.get(no)
-        who = f"{no} 号" + (f"（{tag}）" if tag else "")
+        who = f"{no} 号" + (f"（{TAG_NAME.get(tag, tag)}）" if tag else "")
         parts.append(f'<div class="seat"><div class="who">{who}{"".join(badges)}</div>')
         parts.append(f'<div class="hand">{hand_html(counts, s, hands_format)}</div>')
-        parts.append(f'<div class="river">面子 {melds_html(fixed.get(str(s)) or [])}</div>')
-        parts.append(f'<div class="river">河 {river_html(discards.get(str(s)) or [])}</div>')
+        parts.append(f'<div class="river"><span class="lbl">面子</span>{melds_html(fixed.get(str(s)) or [])}</div>')
+        parts.append(f'<div class="river"><span class="lbl">河</span>{river_html(discards.get(str(s)) or [])}</div>')
         parts.append("</div>")
 
     parts.append("</div>")
@@ -163,7 +184,8 @@ def render(state: dict, *, me_no: int | None) -> str:
 
     parts.append("</div>")
     return f"""<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>麻将桌</title>
-<style>{CSS}</style></head><body>{''.join(parts)}</body></html>"""
+<style>{CSS}
+{tileset_css()}</style></head><body>{''.join(parts)}</body></html>"""
 
 
 def main() -> int:
