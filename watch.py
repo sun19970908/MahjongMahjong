@@ -1,9 +1,9 @@
 """2 号的手：牌局一停就自己出，不用叫。
 
-    python watch.py --seat 2              # 默认模型脑（本地 strata）
-    python watch.py --seat 2 --brain fast  # 脚本脑，一手不到 0.1 秒
-    python watch.py --seat 2 --brain mine  # 等我（对话里的人）亲自落子，等不到就快脑保底
-    python watch.py --seat 2 --dry        # 只打印打算怎么打，不落子
+    python watch.py --seat 3              # 默认模型脑（本地 strata）
+    python watch.py --seat 3 --brain fast  # 脚本脑，一手不到 0.1 秒
+    python watch.py --seat 3 --brain mine  # 等我（对话里的人）亲自落子，等不到就快脑保底
+    python watch.py --seat 3 --dry        # 只打印打算怎么打，不落子
 
 盯 seat2/pending.json，看到新的一手就自己想、自己写 answer.json。
 砍掉它：Ctrl+C 或直接杀进程。
@@ -149,7 +149,7 @@ def settle(seat: int, round_no: int, limit: float) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--seat", type=int, default=2)
+    ap.add_argument("--seat", type=int, default=3)
     ap.add_argument("--interval", type=float, default=0.1)
     ap.add_argument("--brain", choices=["fast", "model", "mine"], default="model",
                     help="model=模型脑（默认）；fast=脚本脑；mine=等我落子，等不到就快脑保底")

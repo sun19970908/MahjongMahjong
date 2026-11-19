@@ -318,6 +318,8 @@ def main() -> int:
     if len({p.seat for p in plans}) != len(plans):
         raise SystemExit("座位号撞了，一个人只能坐一张椅子")
 
+    n_seats = len(plans)
+
     # ---- 座位：谁坐哪儿全由计划说，这里只负责把牌友那只椅子造出来 ----
     if args.offline:
         plans = [SeatPlan(p.seat, "random") for p in plans]
@@ -327,13 +329,13 @@ def main() -> int:
         impl = LLMPlayer(StrataClient(), plan.seat, debug_cache=args.cache)
         return LLMSeat(plan.seat, impl)
 
-    table = build_players(plans, seats=4, llm_factory=make_llm, rng=rng)
+    table = build_players(plans, seats=n_seats, llm_factory=make_llm, rng=rng)
     talker = table.talker()
     names = table.names()                              # 下标 → 显示名
     llm = next(iter(table.of_kind("llm")), None)
     me = next((i for i, p in table.players.items() if p.kind == "human"),
-              seats_mod.index(args.seat, 4))
-    buddy = seats_mod.index(llm.seat, 4) if llm else None
+              seats_mod.index(args.seat, n_seats))
+    buddy = seats_mod.index(llm.seat, n_seats) if llm else None
     agent = next((i for i, p in table.players.items() if p.kind == "external"), None)
     if llm and not saved:
         llm.impl.reset_temp_notes()        # 临时笔记只管这一局
@@ -352,8 +354,8 @@ def main() -> int:
             llm.impl._pause_calls = int(meta["llm"].get("pause_calls") or 0)
         print(f" 接上第 {steps} 步：{meta.get('phase', '')}，牌墙 {len(game.wall)} 张")
     else:
-        dealer = None if args.dealer is None else seats_mod.index(args.dealer, 4)
-        game = Game(GameConfig(seats=4, seed=args.seed, dealer=dealer))
+        dealer = None if args.dealer is None else seats_mod.index(args.dealer, n_seats)
+        game = Game(GameConfig(seats=n_seats, seed=args.seed, dealer=dealer))
         game.start()
         log = []
         said: dict[int, str] = {}
@@ -373,16 +375,16 @@ def main() -> int:
             "llm": None if not llm else {"messages": llm.impl.messages,
                                          "pause_calls": llm.impl._pause_calls},
         })
-    board = {s: 0 for s in range(4)}        # 累计分，按座位下标记账
+    board = {s: 0 for s in range(n_seats)}        # 累计分，按座位下标记账
     rounds = max(1, args.rounds)
     winner = None
     stopped = False
 
     for rnd in range(rounds):
         if rnd:                              # 下一局：庄家胡了连庄，否则下家坐庄
-            nxt = seats_mod.next_dealer(game.dealer, winner, 4)
+            nxt = seats_mod.next_dealer(game.dealer, winner, n_seats)
             seed = None if args.seed is None else args.seed + rnd
-            game = Game(GameConfig(seats=4, seed=seed, dealer=nxt))
+            game = Game(GameConfig(seats=n_seats, seed=seed, dealer=nxt))
             game.start()
             said.clear()
             log.clear()
@@ -465,7 +467,7 @@ def main() -> int:
         winner = res.get("seat")
         if any(board.values()):
             print(" 累计：" + "　".join(
-                f"{names.get(s) or str(seats_mod.label(s)) + '号'} {board[s]:+d}" for s in range(4)))
+                f"{names.get(s) or str(seats_mod.label(s)) + '号'} {board[s]:+d}" for s in range(n_seats)))
         if stopped:
             break
 

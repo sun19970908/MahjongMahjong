@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """外部座位的进出接口。给任何进程（包括我）用：
 
-    python seat_io.py pending --seat 2          # 这一手该你了吗（没有就打印 none）
-    python seat_io.py wait    --seat 2 --timeout 600
-    python seat_io.py answer  --seat 2 --kind discard --tile m3 --say "这张先走"
-    python seat_io.py answer  --seat 2 --kind chi --combo s4+s6
-    python seat_io.py answer  --seat 2 --kind pause --say "等一下，这手我有话要说"
-    python seat_io.py give-up --seat 2          # 这手不想了，交给随机
+    python seat_io.py pending --seat 3          # 这一手该你了吗（没有就打印 none）
+    python seat_io.py wait    --seat 3 --timeout 600
+    python seat_io.py answer  --seat 3 --kind discard --tile m3 --say "这张先走"
+    python seat_io.py answer  --seat 3 --kind chi --combo s4+s6
+    python seat_io.py answer  --seat 3 --kind pause --say "等一下，这手我有话要说"
+    python seat_io.py give-up --seat 3          # 这手不想了，交给随机
     python seat_io.py trace   -n 20             # 复盘：谁做了什么、多久、读了多少 token
 
 只用文件，不占端口，不联网。
@@ -232,18 +232,18 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("pending")
-    p.add_argument("--seat", type=int, default=2)
+    p.add_argument("--seat", type=int, default=3)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_pending)
 
     p = sub.add_parser("wait")
-    p.add_argument("--seat", type=int, default=2)
+    p.add_argument("--seat", type=int, default=3)
     p.add_argument("--timeout", type=float, default=0)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_wait)
 
     p = sub.add_parser("answer")
-    p.add_argument("--seat", type=int, default=2)
+    p.add_argument("--seat", type=int, default=3)
     p.add_argument("--pick", type=int, default=0, help="直接选第几个可选动作（带 meta，加杠/明杠必须用它）")
     p.add_argument("--kind", default="")
     p.add_argument("--tile", default=None)
@@ -252,7 +252,7 @@ def main() -> int:
     p.set_defaults(func=cmd_answer)
 
     p = sub.add_parser("give-up")
-    p.add_argument("--seat", type=int, default=2)
+    p.add_argument("--seat", type=int, default=3)
     p.set_defaults(func=cmd_give_up)
 
     p = sub.add_parser("trace")
@@ -267,12 +267,12 @@ def main() -> int:
     p.set_defaults(func=cmd_log)
 
     p = sub.add_parser("hear", help="读他在递话窗口里说的话")
-    p.add_argument("--seat", type=int, default=2)
+    p.add_argument("--seat", type=int, default=3)
     p.add_argument("-n", type=int, default=10)
     p.set_defaults(func=cmd_hear)
 
     p = sub.add_parser("tell", help="往递话窗口回一句")
-    p.add_argument("--seat", type=int, default=2)
+    p.add_argument("--seat", type=int, default=3)
     p.add_argument("text")
     p.set_defaults(func=cmd_tell)
 
