@@ -349,6 +349,7 @@ class LLMPlayer:
             "报听要主动调 ting：手牌听牌之后报听，报听后手牌锁死——只能把刚摸进来的那张打回去，"
             "可以杠，不能碰不能吃；没报听不能胡。\n"
             "出牌必须调用工具，不许只用文字回答；牌用 m1..m9 / p1..p9 / s1..s9 / z5 表示。"
+            "例外：系统已经把唯一合法动作自动落子时，不用再调工具，只说话。"
         )
         # 笔记只在这里插一次：system 是整段对话的开头，每一手都省下一千多字的重复
         notes = self._read_notes()
@@ -457,11 +458,12 @@ class LLMPlayer:
             "【牌桌】",
             self._describe(d.view),
             f"【本轮只能做这些】{self._actions_text(d.legal, always=False)}",
-            "这一手没得选，照着打下去就行。牌桌上说一句人话，不超过 20 字（别报手牌、别报在等哪张），不用调工具。",
+            "这一手只有唯一合法动作，系统已经自动替你落子。你只要在牌桌上说一句人话，"
+            "不超过 20 字（别报手牌、别报在等哪张），不用再调用工具。",
         ])
         try:
             r = self.client.chat(self.messages + [{"role": "user", "content": prompt}],
-                                 model=self.model, tools=TOOLS, tool_choice="auto",
+                                 model=self.model, tools=None,
                                  max_tokens=_room_for(budget), reasoning_budget=budget)
         except Exception:                                     # 说不出话就别拦着出牌
             return ""
