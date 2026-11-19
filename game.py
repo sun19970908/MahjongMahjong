@@ -60,10 +60,11 @@ def _tool(name: str, desc: str, props: dict, required: list[str]) -> dict:
 # 这一手能做哪几件事，由 user 消息末尾的【本轮只能做这些】说；真调了不能做的，
 # _action_from_call 会挡掉，笔记和暂停另有阶段守卫。
 
-# 笔记：长期那份打完才许动，临时那份中场暂停时记
+# 笔记：长期那份整场只能往草稿里追加，全部局打完才并档；临时那份只这一局用
 NOTE_TOOL: dict = _tool(
     "edit_note",
-    "改笔记，可以只改其中一段。target=long 是长期笔记（牌友笔记.md，打完才能改，下一局生效）；"
+    "改笔记，可以只改其中一段。target=long 是长期笔记（牌友笔记.md；局中只能追加到底部草稿，"
+    "全部局打完才并档、才能改原文，改完下次开桌生效）；"
     "target=temp 是临时笔记（只这一局用，随牌桌一起给你看）。"
     "mode=append 往末尾加一条，写 new_string；"
     "mode=replace 把 old_string 那一小段原文换成 new_string，old_string 必须唯一，"

@@ -388,8 +388,11 @@ def main() -> int:
     rounds = max(1, args.rounds)
     winner = None
     stopped = False
+    finished_all = False
 
     for rnd in range(rounds):
+        if rnd and llm:
+            llm.impl.reset_temp_notes()      # 新一局只清临时笔记；长期草稿整场留着
         if rnd:                              # 下一局：庄家胡了连庄，否则下家坐庄
             nxt = seats_mod.next_dealer(game.dealer, winner, n_seats)
             seed = None if args.seed is None else args.seed + rnd
@@ -480,28 +483,39 @@ def main() -> int:
         if any(board.values()):
             print(" 累计：" + "　".join(
                 f"{names.get(s) or str(seats_mod.label(s)) + '号'} {board[s]:+d}" for s in range(n_seats)))
+
+        # 打完一局就开聊；连打时这只是局间，只能往草稿里追加长期笔记
+        last = (rnd == rounds - 1) or stopped
+        if last and game.result:
+            finished_all = True
+        if talker and game.result:
+            phase = "after" if last else "between"
+            if last:
+                print("\n 所有局都打完了。想跟牌友聊两句就直接打字，空行回车结束。")
+                print(" （现在可以改长期笔记了，改完下次开桌生效）")
+            else:
+                print("\n 这一局打完了，下一局还没开。想跟牌友聊两句就直接打字，空行回车结束。")
+                print(" （现在只能追加长期笔记，草稿整场攒着，全部打完再并档）")
+            while True:
+                try:
+                    line = input(" 你：").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                if not line:
+                    break
+                print(f" {names.get(buddy) or ''}：{talker.chat(line, phase=phase)}", flush=True)
+
         if stopped:
             break
 
     if llm:
+        if finished_all:
+            llm.impl.finish_session()      # 打完最后一场、甚至没聊，也把草稿并档
         print(f" 牌友出牌 {len(llm.impl.records)} 次，兜底 "
               f"{sum(1 for r in llm.impl.records if r.used_fallback)} 次")
         if args.cache:
             print(llm.impl.cache_report())
-
-    # 牌局散了才开聊：接在同一段历史后面，它记得这局怎么打的
-    if talker and game.result:
-        print("\n 牌局散了。想跟牌友聊两句就直接打字，空行回车结束。")
-        print(" （它也能自己改笔记，跟它说“把笔记加一条……”就行；改完下一局生效）")
-        while True:
-            try:
-                line = input(" 你：").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
-            if not line:
-                break
-            print(f" {names.get(buddy) or ''}：{talker.chat(line, phase='after')}", flush=True)
     return 0
 
 

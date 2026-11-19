@@ -35,15 +35,16 @@ from referee import KINDS, RED, Action, parse_tile, tile_id, tile_name
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_NOTES = HERE / "牌友笔记.md"
+DEFAULT_DRAFT = HERE / "长期笔记草稿.md"
 DEFAULT_LOG = HERE / "llm_log.jsonl"
 
 # 旧存档里写进历史的占位话：模型会把它当成自己上一句台词照着念，一句都别再摆上桌
 _FILLERS = frozenset({"（闲下来想这手牌，还没想完）", "（闲下来想这手牌,还没想完）"})
 
-# 任何时候都能喊的两件事（不算这一手）：说两句停一下、记条临时笔记。
+# 任何时候都能喊的两件事（不算这一手）：说两句停一下、记条笔记。
 # 以前只有"中场暂停 / 散场闲聊"才提，出牌那手它根本不知道还能这么干。
 _ALWAYS = ("；另外这两件随手就能喊：pause（这手先不打，停下来跟他说两句）、"
-           "edit_note（记临时笔记，target=temp，记完接着打这一手）")
+           "edit_note（临时笔记 target=temp；长期笔记局中只能 target=long 追加草稿，记完接着打这一手）")
 
 
 # ---------------------------------------------------------------- HTTP
@@ -266,6 +267,7 @@ class LLMPlayer:
         seat: int,
         *,
         notes_path: Path | str = DEFAULT_NOTES,
+        draft_path: Path | str | None = None,
         soft_notes_path: Path | str | None = None,
         log_path: Path | str | None = DEFAULT_LOG,
         model: str = "strata-lowthink",
@@ -281,6 +283,13 @@ class LLMPlayer:
         self.client = client
         self.seat = seat
         self.notes_path = Path(notes_path)
+        if draft_path:
+            self.draft_path = Path(draft_path)
+        elif self.notes_path == DEFAULT_NOTES:
+            self.draft_path = DEFAULT_DRAFT
+        else:
+            # 自测会用临时笔记路径，草稿跟着各自走，别串台
+            self.draft_path = self.notes_path.with_name(self.notes_path.stem + ".草稿.md")
         self.rules_path = HERE / "规则.txt"
         # 临时笔记：只这一局用，随牌桌一起贴在每手的 user 消息里（在尾巴上，不毁前缀）
         self.temp_notes_path = (Path(soft_notes_path) if soft_notes_path
@@ -300,10 +309,12 @@ class LLMPlayer:
         self.debug_cache = debug_cache       # 每次请求后打一行命中率
         self.cache_stats: list[dict] = []
         self._chatted = False                # 中场暂停 / 散场闲聊有没有开过口
-        self._phase = "play"                 # play / pause / after：笔记权限按这个分
+        self._last_chat_phase: str | None = None   # 上次聊天的场景：换场景要重新递笔记
+        self._phase = "play"                 # play / pause / between / after：笔记权限按这个分
         self._pause_calls = 0                # 这一回合它喊了几次暂停
-        self._long_draft: list[str] = []     # 局中追加的长期笔记草稿，下一局并进顶部
+        self._long_draft: list[str] = []     # 整场追加的长期笔记草稿，全部打完再并档
         self._long_draft_in_notes = False    # 草稿是否已经落进长期笔记文件
+        self._load_long_draft()
         self.on_progress: Callable | None = None   # 流式心跳钩子：(kind, 想字, 说字)
         self._tick_at = 0.0
         self._last_say = ""                  # 上一手说出口的那句：同一句再说一遍就是复读
@@ -702,7 +713,7 @@ class LLMPlayer:
 
     # ---- 说话：中场暂停 / 散场闲聊共用 ----
     def chat(self, text: str, *, budget: int | None = None, phase: str = "after") -> str:
-        """跟它说话。phase=after 是散场闲聊，phase=pause 是牌局中途暂停。
+        """跟它说话。phase=pause 局中暂停，between 局间，after 整场打完。
 
         接在同一段历史后面发，工具表整局一张，前缀缓存照旧命中。
         预算单算一档：报听后的低预算只管出牌，聊天永远满额（暂停也一样）。
@@ -713,14 +724,20 @@ class LLMPlayer:
         # 有人开口之前，先把还在飞的自由思考掐掉：不然这条聊天排在它后面，
         # 你得对着"牌先停着"等它把那手空想完。
         self.cut_prefetch()
-        head = ("【中场暂停】牌先停在这儿，不急着出。随便聊，想记就记临时笔记"
-                "（edit_note 用 target=temp）；长期笔记也能追加，用 target=long，"
-                "先记在底部草稿里，下一局并进顶部。\n"
-                if phase == "pause" else
-                "【散场闲聊】牌局散了，现在是闲聊时间。就照你自己的性子说话，"
-                "可以聊刚才那手牌，也可以聊别的。\n")
+        if phase == "pause":
+            head = ("【中场暂停】牌先停在这儿，不急着出。随便聊，想记就记临时笔记"
+                    "（edit_note 用 target=temp）；长期笔记也能追加，用 target=long，"
+                    "先记在底部草稿里，整场打完再并进长期笔记。\n")
+        elif phase == "between":
+            head = ("【局间闲聊】这一局打完了，下一局还没开。随便聊，可以聊刚才那手。"
+                    "现在只能追加长期笔记（target=long，mode=append），草稿整场留着，"
+                    "全部局打完才并档；要改笔记原文等最后一场打完。\n")
+        else:
+            head = ("【散场闲聊】所有局都打完了，现在是闲聊时间。就照你自己的性子说话，"
+                    "可以聊刚才那几手，也可以聊别的。现在可以改长期笔记：追加或改原文都行，"
+                    "改完下次开桌的顶部生效。\n")
         if phase == "after":
-            self._flush_long_draft()        # 散场就把草稿并进长期笔记，下一局顶部生效
+            self.finish_session()          # 整场结束才并档；本场顶部 system 仍不动
         # 聊天也把这一局的临时笔记带上：局中聊完接着打，散场聊完才好把经验写进长期笔记
         soft = self._read_soft_notes()
         if soft:
@@ -728,11 +745,15 @@ class LLMPlayer:
         draft = self._draft_block()
         if draft:
             head += f"\n{draft}\n"
-        if phase == "after":
-            head += "\n（这一局的经验要留下，就调 edit_note 写进长期笔记：target=long；临时笔记下一局会清空。）\n"
-        first = not self._chatted
-        said = (head + text) if first else text
+        if phase == "between":
+            head += "\n（这一局的经验要留，就追加长期笔记：target=long；草稿整场有效，全部打完才并档。）\n"
+        elif phase == "after":
+            head += "\n（现在可以追加或改长期笔记：target=long；改完下次开桌顶部生效。临时笔记下一局会清空。）\n"
+        # 换场景或新一局的第一句，再把当前笔记和规矩递一遍；同一场里后面的话不重复贴
+        fresh = (not self._chatted) or phase != self._last_chat_phase
+        said = (head + text) if fresh else text
         self._chatted = True
+        self._last_chat_phase = phase
         self.messages.append({"role": "user", "content": said})
         try:
             r = self._chat_call(budget)
@@ -741,7 +762,7 @@ class LLMPlayer:
             return f"（没接上话：{e}）"
         if r.tool_call and r.tool_call.get("name") == "edit_note":
             # 笔记是它的，它想记就记：拦住只会让它以为引擎坏了（"你再试试"也照样被拒）。
-            # 局中能动的只有临时笔记、长期笔记要到散场，这条界线由 _apply_note 把。
+            # 局中能动的只有临时笔记和长期笔记草稿，改原文要等整场打完，这条界线由 _apply_note 把。
             done = self._apply_note(r.tool_call.get("arguments") or {})
             call_id = f"note_{len(self.messages)}"
             self.messages.append({
@@ -774,12 +795,32 @@ class LLMPlayer:
         return r
 
     def reset_temp_notes(self) -> None:
-        """新一局开始：草稿并进长期笔记，临时笔记清空，它这局重新记。"""
-        self._flush_long_draft()
-        self._long_draft.clear()
-        self._long_draft_in_notes = False
+        """新一局开始：只清临时笔记；整场草稿留着，全部打完才并档。"""
         try:
             self.temp_notes_path.write_text("", encoding="utf-8")
+        except OSError:
+            pass
+        self._chatted = False
+        self._last_chat_phase = None
+
+    def finish_session(self) -> None:
+        """整场打完：把草稿并进长期笔记文件（下次开桌的顶部才带上）。"""
+        self._flush_long_draft()
+
+    def _load_long_draft(self) -> None:
+        """草稿也要能恢复：开桌时从草稿文件读回来。"""
+        try:
+            lines = self.draft_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return
+        self._long_draft = [ln.strip() for ln in lines if ln.strip()]
+
+    def _save_long_draft(self) -> None:
+        try:
+            if not self._long_draft:
+                self.draft_path.unlink(missing_ok=True)
+                return
+            self.draft_path.write_text("\n".join(self._long_draft) + "\n", encoding="utf-8")
         except OSError:
             pass
 
@@ -788,9 +829,9 @@ class LLMPlayer:
         if not self._long_draft:
             return ""
         if self._long_draft_in_notes:
-            head = "【长期笔记追加草稿（已记入长期笔记，下一局顶部生效）】"
+            head = "【长期笔记追加草稿（已记入长期笔记，下次开桌顶部生效）】"
         else:
-            head = "【长期笔记追加草稿（本局暂存，下一局并入顶部）】"
+            head = "【长期笔记追加草稿（整场暂存，全部打完再并入长期笔记）】"
         return head + "\n" + "\n".join(self._long_draft)
 
     def _flush_long_draft(self) -> None:
@@ -806,16 +847,24 @@ class LLMPlayer:
             body = "\n".join(x for x in (body, *self._long_draft) if x)
             self.notes_path.write_text(body[:4000].rstrip() + "\n", encoding="utf-8")
             self._long_draft_in_notes = True
+            try:                                  # 并档后草稿文件清空，重启不会再并一遍
+                self.draft_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         except OSError:
             pass
 
     def _add_long_draft(self, new: str) -> None:
+        if self._long_draft_in_notes:        # 上一批已经并档了，从现在起只记新的
+            self._long_draft.clear()
+            self._long_draft_in_notes = False
         fresh = []
         for ln in new.splitlines():
             ln = ln.strip()
             if ln:
                 fresh.append(ln if ln[:1] in "-*#" else "- " + ln)
         self._long_draft.extend(fresh)
+        self._save_long_draft()
 
     def _apply_note(self, args: dict) -> str:
         """edit_note 落地：append 追加 / replace 定点换一段 / replace_all 全换。
@@ -831,16 +880,16 @@ class LLMPlayer:
         new = str(args.get("new_string") or args.get("text") or "")
         if not mode:
             mode = "replace" if old else "append"
-        # 长期笔记：局中先记进底部草稿，不动顶部 system；散场才直接落盘
+        # 长期笔记：整场先记进底部草稿，不动顶部 system；全部局打完才直接落盘
         if not target:
             target = "temp" if self._phase != "after" else "long"
         if target == "long" and self._phase != "after":
             if mode != "append":
-                return "局中只能在草稿里追加长期笔记（mode=append），改原文等散场再动"
+                return "局中只能在草稿里追加长期笔记（mode=append），改原文等全部局打完再动"
             if not new.strip():
                 return "没写内容，草稿没动"
             self._add_long_draft(new)
-            return "长期笔记追加草稿记在牌桌底部了，下一局并进长期笔记。现在是：\n" + "\n".join(self._long_draft)
+            return "长期笔记追加草稿记在牌桌底部了，整场打完再并进长期笔记。现在是：\n" + "\n".join(self._long_draft)
         if target == "long":
             # 散场：直接改长期笔记文件；追加的同时留在草稿块里给它看一眼
             try:
@@ -867,7 +916,7 @@ class LLMPlayer:
                     self.notes_path.write_text(body[:4000].rstrip() + "\n", encoding="utf-8")
                 else:
                     return f"不认识的做法 {mode}"
-                return "长期笔记改好了（下一局顶部生效）。现在是：\n" + body[-1200:]
+                return "长期笔记改好了（下次开桌顶部生效）。现在是：\n" + body[-1200:]
             except OSError as e:
                 return f"没写成：{e}"
 
@@ -1339,8 +1388,19 @@ def _selftest() -> int:
     case("散场聊天也带上临时笔记", "【本局临时笔记】" in fcA.calls[0]["messages"][-1]["content"], True)
     case("散场提醒写长期笔记", "target=long" in fcA.calls[0]["messages"][-1]["content"], True)
 
+    noteB = Path(tempfile.gettempdir()) / "_mahjong_note_b.md"
+    noteB.write_text("", encoding="utf-8")
+    noteB.with_name(noteB.stem + ".草稿.md").unlink(missing_ok=True)
+    fcB = _FakeClient([ChatResult(content="局间聊两句")])
+    pB = LLMPlayer(fcB, 0, log_path=None, notes_path=noteB)
+    pB.chat("局间随便聊", phase="between")
+    case("局间有单独的开场", "【局间闲聊】" in fcB.calls[0]["messages"][-1]["content"], True)
+    case("局间只让追加长期笔记", "mode=append" in fcB.calls[0]["messages"][-1]["content"], True)
+
     noteL = Path(tempfile.gettempdir()) / "_mahjong_note_long.md"
     noteL.write_text("", encoding="utf-8")
+    draftL = noteL.with_name(noteL.stem + ".草稿.md")
+    draftL.unlink(missing_ok=True)
     fcL = _FakeClient([
         ChatResult(tool_call={"name": "edit_note", "arguments": {
             "target": "long", "mode": "append", "new_string": "不该现在写"}}),
@@ -1351,9 +1411,33 @@ def _selftest() -> int:
     case("局中长笔记先记草稿", (noteL.read_text(encoding="utf-8").strip(), "不该现在写" in pL._draft_block()),
          ("", True))
     case("草稿贴在牌桌底部", "【长期笔记追加草稿" in pL._user_prompt(d, 3000), True)
+    case("草稿落盘能恢复", "不该现在写" in draftL.read_text(encoding="utf-8"), True)
+    pR = LLMPlayer(_FakeClient([ChatResult(content="接着打")]), 0, log_path=None, notes_path=noteL)
+    case("重启后草稿还在", "不该现在写" in pR._draft_block(), True)
     pL.chat("打完聊两句", phase="after")
     case("散场并进长期笔记", "不该现在写" in noteL.read_text(encoding="utf-8"), True)
     case("并完草稿标已记入", "已记入长期笔记" in pL._draft_block(), True)
+    case("并完草稿文件清掉", draftL.exists(), False)
+
+    # 换局只清临时笔记，草稿整场留着；两者都要能恢复
+    noteP = Path(tempfile.gettempdir()) / "_mahjong_note_p.md"
+    noteP.write_text("", encoding="utf-8")
+    tempP = Path(tempfile.gettempdir()) / "_mahjong_temp_p.md"
+    tempP.write_text("- 本局临时记的\n", encoding="utf-8")
+    draftP = noteP.with_name(noteP.stem + ".草稿.md")
+    draftP.unlink(missing_ok=True)
+    pP1 = LLMPlayer(_FakeClient([ChatResult(content="记着")]), 0, log_path=None,
+                    notes_path=noteP, soft_notes_path=tempP)
+    pP1._add_long_draft("整场攒的草稿")
+    pP2 = LLMPlayer(_FakeClient([ChatResult(content="下一局")]), 0, log_path=None,
+                    notes_path=noteP, soft_notes_path=tempP)
+    case("重开后草稿能恢复", "整场攒的草稿" in pP2._draft_block(), True)
+    case("重开后临时笔记能恢复", "本局临时记的" in pP2._user_prompt(d, 3000), True)
+    pP2.reset_temp_notes()
+    case("换局草稿不并档", "整场攒的草稿" in pP2._draft_block(), True)
+    case("换局临时笔记清空", tempP.read_text(encoding="utf-8").strip(), "")
+    pP2.finish_session()
+    case("整场打完才并档", "整场攒的草稿" in noteP.read_text(encoding="utf-8"), True)
 
     # 5f 没让它改也可以自己记：以前按字眼卡，硬试两次都被挡，它会以为引擎坏了
     note2 = Path(tempfile.gettempdir()) / "_mahjong_note2.md"
