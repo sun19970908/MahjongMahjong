@@ -293,8 +293,11 @@ def apply_and_note(game: Game, act: Action, log: list[str], me: int) -> None:
             label = {"in_hand": "明杠", "added": "加杠"}.get((e.data or {}).get("kind"), "杠")
             log.append(f"{seats_mod.label(e.seat)}号 {label} {name}")
         elif t == "ting":
-            waits = "、".join(face(t)[0].strip() for t in (e.data or {}).get("waits", []))
-            log.append(f"{seats_mod.label(e.seat)}号 报听" + (f"（等 {waits}）" if waits else ""))
+            if e.seat == me:
+                waits = "、".join(face(t)[0].strip() for t in (e.data or {}).get("waits", []))
+                log.append("你 报听" + (f"（等 {waits}）" if waits else ""))
+            else:
+                log.append(f"{seats_mod.label(e.seat)}号 报听")
         elif t == "bloom":
             log.append(f"{seats_mod.label(e.seat)}号 后开花 {name}")
         elif t == "dead":
