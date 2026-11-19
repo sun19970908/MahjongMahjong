@@ -66,6 +66,7 @@ def snapshot(game: Game, meta: dict | None = None) -> dict:
             "kans": {str(s): int(v) for s, v in game.kans.items()},
             "dead": {str(s): bool(v) for s, v in game.dead_win.items()},
             "drawn": None if game.drawn is None else tile_id(game.drawn),
+            "hai": bool(game.hai),
             "drawn_after_kan": bool(game.drawn_after_kan),
             "after_kan": game.after_kan,
             "last_draw": None if game.last_draw is None
@@ -108,6 +109,7 @@ def restore(data: dict) -> tuple[Game, dict]:
     game.dead_win = {s: bool(dead.get(str(s), False)) for s in range(game.cfg.seats)}
     drawn = gs.get("drawn")
     game.drawn = None if drawn is None else parse_tile(drawn)
+    game.hai = bool(gs.get("hai"))
     game.drawn_after_kan = bool(gs.get("drawn_after_kan"))
     game.after_kan = gs.get("after_kan")
     last_draw = gs.get("last_draw")

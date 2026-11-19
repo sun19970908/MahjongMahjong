@@ -195,8 +195,14 @@ def settle_block(result: dict | None) -> list[str]:
             f"{f['label']}" + (f"×{f['fan']}" if f.get("fan", 1) > 1 else "") for f in fans)
         out.append(paint(line, DIM))
     payers = s.get("payers") or {}
+    payer_fans = s.get("payer_fans") or {}
     if payers:
-        out.append("  " + "  ".join(f"{seats_mod.label(int(k))}号 付 {v} 分" for k, v in payers.items()))
+        items = []
+        for k, v in payers.items():
+            own = payer_fans.get(k) or []
+            tag = f"（{'、'.join(f['label'] for f in own)}）" if own else ""
+            items.append(f"{seats_mod.label(int(k))}号{tag} 付 {v} 分")
+        out.append("  " + "  ".join(items))
     return out
 
 
@@ -407,7 +413,9 @@ def main() -> int:
             if d.seat == me and llm and not args.no_prefetch:
                 llm.impl.prefetch_async(game.observe(buddy))
 
-            status = ("你听牌了，报不报？（/p 中场暂停）" if d.kind == "ting_declare" and p.supports == "human"
+            status = ("最后四张：抓了不打，能胡就胡（海底捞月），不能胡就过（/p 中场暂停）"
+                      if getattr(game, "hai", False)
+                      else "你听牌了，报不报？（/p 中场暂停）" if d.kind == "ting_declare" and p.supports == "human"
                       else "轮到你了（/p 中场暂停）" if p.supports == "human"
                       else f"{p.name} 接入中……" if p.supports == "external"
                       else f"{p.name} 在算……" if p.supports == "llm" else p.name)
