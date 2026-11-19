@@ -92,8 +92,20 @@ class HumanPlayer(BasePlayer):
                 return None, ""
             if raw in ("/e", "提前结束"):
                 raise EndEarly()
-            if raw.isdigit() and 1 <= int(raw) <= len(opts):
-                return opts[int(raw) - 1], ""
+            if raw.isdigit():
+                n = int(raw)
+                if d.kind == "discard" and all(a.kind == "discard" for a in opts):
+                    # 手牌下边的序号：同一种牌有两张时，输入 1 或 2 都是打它。
+                    hand = list((d.view or {}).get("hand") or [])
+                    if 1 <= n <= len(hand):
+                        tid = parse_tile(hand[n - 1])
+                        for a in opts:
+                            if a.kind == "discard" and parse_tile(a.tile) == tid:
+                                return a, ""
+                        print(f" 第 {n} 张现在不能打（报听后只能打摸进来的那张）")
+                        continue
+                if 1 <= n <= len(opts):
+                    return opts[n - 1], ""
 
 
 class RandomPlayer(BasePlayer):

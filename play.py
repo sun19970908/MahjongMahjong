@@ -27,7 +27,7 @@ from game import Action, Game, GameConfig
 from llm_player import LLMPlayer, StrataClient
 from players import ExternalPlayer, HumanPlayer, LLMSeat, RandomPlayer, SeatPlan, Tracer, EndEarly
 from players import build_players, parse_players, plan_from_flags
-from referee import tile_id
+from referee import parse_tile, tile_id
 import seats as seats_mod
 import state
 
@@ -96,7 +96,8 @@ RULE = paint("─" * 78, BORDER)
 
 def screen(game: Game, me: int, buddy: int, status: str, log: list[str],
            pick: list[Action] | None = None, say: str = "",
-           names: dict[int, str] | None = None) -> str:
+           names: dict[int, str] | None = None,
+           pick_kind: str | None = None) -> str:
     v = game.observe(me)
     out = [RULE]
     wall = f" 牌墙 {v['wall_left']:>3} 张"
@@ -158,9 +159,15 @@ def screen(game: Game, me: int, buddy: int, status: str, log: list[str],
     out.append(f" 你的手牌（{len(v['hand'])} 张）")
     out += [" " + row for row in hand_block(v["hand"])]
     if pick:
-        opts = []
-        for i, a in enumerate(pick, 1):
-            opts.append(f"{i}.{describe(a)}")
+        if pick_kind == "discard" and all(a.kind == "discard" for a in pick):
+            # 手牌下边的序号就是牌的序号：同一种牌有两张时，两个序号都能打它。
+            by_tile = {parse_tile(a.tile): a for a in pick}
+            opts = [f"{i}.{describe(by_tile[parse_tile(t)])}"
+                    for i, t in enumerate(v["hand"], 1) if parse_tile(t) in by_tile]
+        else:
+            opts = []
+            for i, a in enumerate(pick, 1):
+                opts.append(f"{i}.{describe(a)}")
         line = " " + "  ".join(opts)
         while len(line) > 100:
             cut = line.rfind("  ", 0, 100)
@@ -431,7 +438,8 @@ def main() -> int:
             if p.supports == "external":
                 p.on_wait = show_wait
             draw_screen(screen(game, me, buddy, status, log, d.legal if p.supports == "human" else None,
-                               say=said_text(), names=names))
+                               say=said_text(), names=names,
+                               pick_kind=d.kind if p.supports == "human" else None))
 
             t0 = time.time()
             try:
