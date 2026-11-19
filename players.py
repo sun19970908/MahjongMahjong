@@ -201,7 +201,7 @@ def action_from_dict(payload: dict) -> Action | None:
         if kind == "chi":
             combo = payload.get("combo") or []
             return Action("chi", combo=tuple(parse_tile(t) for t in combo), meta=meta)
-        if kind in ("win", "pass"):
+        if kind in ("win", "pass", "ting", "bloom", "draw"):
             return Action(kind, meta=meta)
     except (ValueError, TypeError):
         return None
@@ -217,7 +217,7 @@ def _legal(d: Decision, act: Action) -> bool:
             return True
         if a.kind == "chi" and a.combo == act.combo:
             return True
-        if a.kind in ("win", "pass"):
+        if a.kind in ("win", "pass", "ting", "bloom", "draw"):
             return True
     return False
 
