@@ -16,6 +16,7 @@ from pathlib import Path
 
 from game import Game, GameConfig
 from referee import Action, Meld, parse_tile, tile_id
+import seats
 
 VERSION = 1
 
@@ -44,7 +45,8 @@ def snapshot(game: Game, meta: dict | None = None) -> dict:
     return {
         "version": VERSION,
         "cfg": {"seats": game.cfg.seats, "start_hand": game.cfg.start_hand,
-                "dealer": game.cfg.dealer, "seed": game.cfg.seed},
+                "dealer": game.dealer, "seed": game.cfg.seed,
+                "dice": None if game.dice is None else [game.dice.a, game.dice.b, game.dice.total]},
         "game": {
             "hands_format": "counts",          # 计数数组，不是牌名；手牌张数 = sum(counts)
             "wall": [tile_id(t) for t in game.wall],
@@ -59,8 +61,12 @@ def snapshot(game: Game, meta: dict | None = None) -> dict:
             "rob": None if game.rob is None else [game.rob[0], tile_id(game.rob[1]), game.rob_kind],
             "result": game.result,
             "ting": {str(s): bool(v) for s, v in game.ting.items()},
+            "ting_closed": {str(s): bool(v) for s, v in game.ting_closed.items()},
+            "kans": {str(s): int(v) for s, v in game.kans.items()},
             "dead": {str(s): bool(v) for s, v in game.dead_win.items()},
             "drawn": None if game.drawn is None else tile_id(game.drawn),
+            "drawn_after_kan": bool(game.drawn_after_kan),
+            "after_kan": game.after_kan,
             "last_draw": None if game.last_draw is None
             else {"seat": game.last_draw[0], "tile": tile_id(game.last_draw[1])},
         },
@@ -71,7 +77,10 @@ def snapshot(game: Game, meta: dict | None = None) -> dict:
 def restore(data: dict) -> tuple[Game, dict]:
     cfg = data.get("cfg") or {}
     game = Game(GameConfig(seats=cfg.get("seats", 4), start_hand=cfg.get("start_hand", 13),
-                           dealer=cfg.get("dealer", 0), seed=cfg.get("seed")))
+                           dealer=cfg.get("dealer"), seed=cfg.get("seed")))
+    dice = cfg.get("dice")
+    if dice:
+        game.dice = seats.Dice(int(dice[0]), int(dice[1]), int(dice[2]), seats.label(game.dealer))
     gs = data["game"]
     game.wall = deque(parse_tile(t) for t in gs.get("wall") or [])
     game.hands = {int(s): list(v) for s, v in (gs.get("hands") or {}).items()}
@@ -89,10 +98,16 @@ def restore(data: dict) -> tuple[Game, dict]:
     game.result = gs.get("result")
     ting = gs.get("ting") or {}
     game.ting = {s: bool(ting.get(str(s), False)) for s in range(game.cfg.seats)}
+    closed = gs.get("ting_closed") or {}
+    game.ting_closed = {s: bool(closed.get(str(s), False)) for s in range(game.cfg.seats)}
+    kans = gs.get("kans") or {}
+    game.kans = {s: int(kans.get(str(s), 0)) for s in range(game.cfg.seats)}
     dead = gs.get("dead") or {}
     game.dead_win = {s: bool(dead.get(str(s), False)) for s in range(game.cfg.seats)}
     drawn = gs.get("drawn")
     game.drawn = None if drawn is None else parse_tile(drawn)
+    game.drawn_after_kan = bool(gs.get("drawn_after_kan"))
+    game.after_kan = gs.get("after_kan")
     last_draw = gs.get("last_draw")
     game.last_draw = None if not last_draw else (int(last_draw["seat"]), parse_tile(last_draw["tile"]))
     return game, (data.get("meta") or {})

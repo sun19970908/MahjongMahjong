@@ -24,13 +24,18 @@ import json
 import os
 import random
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
 
+import seats as seats_mod
 from game import Action, Decision, random_policy
 from referee import parse_tile
 
 DEFAULT_SEAT_ROOT = Path(__file__).resolve().parent / "seats"
+
+# 玩家类型：别在 play.py 里写死"几号是什么人"，都由这张表 + 座位计划决定
+KINDS = ("human", "llm", "external", "random")
 
 
 class Player(Protocol):
@@ -45,7 +50,12 @@ class BasePlayer:
     supports = "player"
 
     def __init__(self, seat: int) -> None:
-        self.seat = seat
+        self.seat = seat            # 座位号（1 起），不是引擎下标
+
+    @property
+    def kind(self) -> str:
+        """玩家类型：human / llm / external / random，交给装配层看。"""
+        return self.supports
 
     def decide(self, d: Decision) -> tuple[Action | None, str]:
         raise NotImplementedError
@@ -120,7 +130,7 @@ class ExternalPlayer(BasePlayer):
     def __init__(self, seat: int, root: Path | str | None = None, poll: float = 0.05,
                  wait: float = 0.0, on_wait: Callable[[float], None] | None = None) -> None:
         super().__init__(seat)
-        self.dir = Path(root or DEFAULT_SEAT_ROOT) / f"seat{seat}"
+        self.dir = Path(root or DEFAULT_SEAT_ROOT) / seats_mod.seat_dir(seat)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.name = f"{seat}号（接入）"
         self.supports = "external"
@@ -233,3 +243,104 @@ class Tracer:
         row.setdefault("t", time.strftime("%H:%M:%S"))
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+# ---------------------------------------------------------------- 座位计划
+# 一桌怎么坐，全由 SeatPlan 说；play.py 不再认识具体类型，只管问 Table 要人。
+
+
+@dataclass(frozen=True)
+class SeatPlan:
+    """一个座位：坐第几号（1 起）、坐的是哪种玩家、各自的参数。"""
+
+    seat: int                               # 座位号（1 起，显示用）
+    kind: str = "random"                    # human / llm / external / random
+    options: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.kind not in KINDS:
+            raise ValueError(f"没这种玩家：{self.kind}（只有 {'/'.join(KINDS)}）")
+        if self.seat < 1:
+            raise ValueError(f"座位号从 1 起，收到 {self.seat}")
+
+
+def parse_players(text: str, seats: int = 4) -> list[SeatPlan]:
+    """把命令行的玩家配置读成计划。
+
+    两种写法：
+        "human,llm,external,random"  按 1..4 号依次排
+        "2=llm,3=external"           点名叫座，剩下的补随机
+    """
+    spec = (text or "").strip()
+    if not spec:
+        return [SeatPlan(s + 1, "random") for s in range(seats)]
+    assigns: dict[int, str] = {}
+    if "=" in spec:
+        for item in spec.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            left, _, kind = item.partition("=")
+            assigns[int(left.strip())] = kind.strip()
+    else:
+        for i, kind in enumerate((x.strip() for x in spec.split(",")), start=1):
+            if kind:
+                assigns[i] = kind
+    return [SeatPlan(s + 1, assigns.get(s + 1, "random")) for s in range(seats)]
+
+
+def plan_from_flags(*, seats: int = 4, human: int | None = None,
+                    buddy: int | None = None, agent: int | None = None) -> list[SeatPlan]:
+    """老参数（--seat / --buddy / --agent）也能读成计划，默认谁都没坐就全随机。"""
+    kinds: dict[int, str] = {}
+    if human is not None:
+        kinds[human] = "human"
+    if buddy is not None:
+        kinds[buddy] = "llm"
+    if agent is not None:
+        kinds[agent] = "external"
+    return [SeatPlan(s + 1, kinds.get(s + 1, "random")) for s in range(seats)]
+
+
+class Table:
+    """一桌人：座位号 → 玩家。引擎只按 0 基下标要人，换算都在这层下面。"""
+
+    def __init__(self, players: list[BasePlayer], seats: int = 4) -> None:
+        self.players = {seats_mod.index(p.seat, seats): p for p in players}
+        self.seats = seats
+
+    def at(self, index: int) -> BasePlayer:
+        return self.players[index]
+
+    def names(self) -> dict[int, str]:
+        """下标 → 显示名，给画面用。"""
+        return {i: p.name for i, p in self.players.items()}
+
+    def of_kind(self, kind: str) -> list[BasePlayer]:
+        return [p for p in self.players.values() if p.kind == kind]
+
+    def talker(self) -> BasePlayer | None:
+        """中场能聊天的那个座位（现阶段就是牌友 LLM）。"""
+        llms = self.of_kind("llm")
+        return llms[0] if llms else None
+
+
+def build_players(plans: list[SeatPlan], *, seats: int = 4,
+                  llm_factory: Callable[[SeatPlan], BasePlayer] | None = None,
+                  rng: random.Random | None = None) -> Table:
+    """按计划摆人。别的类型自己会造，llm 那张椅子由外面递进来的工厂盖（要网、要模型）。"""
+    made: list[BasePlayer] = []
+    for plan in plans:
+        if plan.kind == "human":
+            made.append(HumanPlayer(plan.seat))
+        elif plan.kind == "llm":
+            if llm_factory is None:
+                raise RuntimeError("这桌要坐牌友，但没给造牌友的工厂")
+            made.append(llm_factory(plan))
+        elif plan.kind == "external":
+            made.append(ExternalPlayer(plan.seat,
+                                       wait=float(plan.options.get("wait", 0)),
+                                       root=plan.options.get("root")))
+        else:
+            made.append(RandomPlayer(plan.seat, rng=rng))
+    return Table(made, seats)

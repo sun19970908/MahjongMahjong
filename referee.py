@@ -662,8 +662,15 @@ class Referee:
         return view.wall_left is not None and view.wall_left <= 0
 
 
-def _fn(name: str, desc: str, props: dict, required: list[str]) -> dict:
-    return {
+_SHARED = Referee()
+
+
+def is_piao_hu(counts, fixed: Sequence[Meld] = ()) -> bool:
+    """飘胡：整手只有刻子和对子，没有顺子。结算里当番种判，不绑座位。"""
+    return _SHARED._piao_hu_shape(counts, fixed)
+
+
+def _fn(name: str, desc: str, props: dict, required: list[str]) -> dict:    return {
         "type": "function",
         "function": {
             "name": name,

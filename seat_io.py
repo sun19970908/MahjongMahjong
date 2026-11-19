@@ -24,10 +24,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from players import DEFAULT_SEAT_ROOT, action_from_dict
+import seats as seats_mod
 
 
 def seat_dir(seat: int) -> Path:
-    d = DEFAULT_SEAT_ROOT / f"seat{seat}"
+    d = DEFAULT_SEAT_ROOT / seats_mod.seat_dir(seat)
     d.mkdir(parents=True, exist_ok=True)
     return d
 

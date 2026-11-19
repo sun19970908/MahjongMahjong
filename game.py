@@ -40,6 +40,8 @@ from referee import (
     tile_name,
     tiles_from,
 )
+import seats as seats_mod
+import scoring
 
 # 反应优先级：胡 > 杠 > 碰 > 吃
 PRIORITY = {"win": 4, "kan": 3, "pon": 2, "chi": 1}
@@ -100,7 +102,7 @@ TOOLS: list[dict] = [
 class GameConfig:
     seats: int = 4
     start_hand: int = 13
-    dealer: int = 0
+    dealer: int | None = None        # 引擎下标；None = 开盘掷骰定庄
     seed: int | None = None
 
     allow_chi: bool = True
@@ -166,7 +168,9 @@ class Game:
         self.hands: dict[int, list[int]] = {s: [0] * KINDS for s in range(config.seats)}
         self.fixed: dict[int, list[Meld]] = {s: [] for s in range(config.seats)}
         self.discards: dict[int, list[int]] = {s: [] for s in range(config.seats)}
-        self.turn: int = config.dealer
+        self.dealer: int = config.dealer or 0
+        self.dice: seats_mod.Dice | None = None
+        self.turn: int = self.dealer
         self.phase: str = "idle"        # idle|draw|discard|react|kan_draw|ended
         self.events: list[Event] = []   # 待取走的事件（UI 增量渲染用）
         self.history: list[Event] = []  # 全程事件（复盘、日志用）
@@ -176,9 +180,13 @@ class Game:
         self.rob_kind: str | None = None                               # 哪种杠被抢：in_hand / added
         self.result: dict | None = None
         self.ting: dict[int, bool] = {s: False for s in range(config.seats)}   # 谁报听了
+        self.ting_closed: dict[int, bool] = {s: False for s in range(config.seats)}  # 报听那一刻是不是闭门
+        self.kans: dict[int, int] = {s: 0 for s in range(config.seats)}        # 谁杠了几次（结算用）
         self.dead_win: dict[int, bool] = {s: False for s in range(config.seats)}  # 谁放过胡了：本局不准再胡
         self.drawn: int | None = None                                        # 刚摸进来的那张
+        self.drawn_after_kan: bool = False                                   # 这张是杠后补的（前开花）
         self.last_draw: tuple[int, int] | None = None                        # 全场最后一次摸牌（谁、什么），荒庄复盘用
+        self.after_kan: int | None = None                                    # 谁刚杠完：他打出的牌被胡就是「流泪」
 
     # ---------- 开局 ----------
     def start(self) -> list[Event]:
@@ -189,9 +197,18 @@ class Game:
         for s in range(self.cfg.seats):
             for _ in range(self.cfg.start_hand):
                 self.hands[s][self.wall.popleft()] += 1
-        self.turn = self.cfg.dealer
+        if self.cfg.dealer is None:                 # 没指定庄家：两颗骰子说了算
+            self.dice = seats_mod.roll(rng, self.cfg.seats)
+            self.dealer = seats_mod.dealer_index(self.dice)
+        else:
+            self.dealer = self.cfg.dealer
+        self.turn = self.dealer
         self.phase = "draw"
-        self._emit(Event("start", data={"seats": self.cfg.seats, "wall": len(self.wall), "dealer": self.cfg.dealer}))
+        self._emit(Event("start", data={
+            "seats": self.cfg.seats, "wall": len(self.wall),
+            "dealer": self.dealer, "dealer_seat": seats_mod.label(self.dealer),
+            "dice": None if self.dice is None else [self.dice.a, self.dice.b, self.dice.total],
+        }))
         return self.drain_events()
 
     # ---------- 问：现在轮到谁 ----------
@@ -286,7 +303,7 @@ class Game:
             raise RuntimeError(f"动作不合法：{res.code} {res.detail}")
 
         if action.kind == "win":
-            self._end_win(seat, tile=None, zimo=True)
+            self._end_win(seat, tile=self.drawn, zimo=True, kan_draw=self.drawn_after_kan)
             return self.drain_events()
 
         if action.kind == "discard":
@@ -329,8 +346,9 @@ class Game:
             raise RuntimeError(f"报听阶段只接受 ting / pass，收到 {action.kind}")
         if action.kind == "ting":
             self.ting[seat] = True
+            self.ting_closed[seat] = not self.fixed[seat]      # 报听那一刻没副露 → 闭门听 + 闷
             waits = [tile_id(t) for t in self.r.waits(self.hands[seat], self.fixed[seat])]
-            self._emit(Event("ting", seat, data={"waits": waits}))
+            self._emit(Event("ting", seat, data={"waits": waits, "closed": self.ting_closed[seat]}))
         # 报完（或不报）再让下家反应 / 摸牌
         self._build_reactors(self.last[0], self.last[2])
         return self.drain_events()
@@ -370,6 +388,8 @@ class Game:
                 raise RuntimeError("加杠找不到原来的碰")
             self._emit(Event("kan", seat, tile, {"kind": "added"}))
         self.phase = "kan_draw"
+        self.kans[seat] += 1
+        self.after_kan = seat            # 他杠完这一下要摸补张：打出去被胡就是「流泪」
         self.last = None
 
     # ---------- 反应 ----------
@@ -437,6 +457,8 @@ class Game:
             self._hand_sub(seat, tile, 3)
             self.fixed[seat].append(Meld("kan", (tile,) * 4))
             self._take_discard(src, tile)
+            self.kans[seat] += 1
+            self.after_kan = seat
             self._emit(Event("kan", seat, tile, {"kind": "open", "from": src}))
             self.turn, self.phase, self.last = seat, "kan_draw", None
             return self.drain_events()
@@ -482,6 +504,10 @@ class Game:
         tile = self.wall.popleft()
         self.hands[seat][tile] += 1
         self.drawn = tile
+        self.drawn_after_kan = kan
+        # 「流泪」只认杠完这一下：等下一家正常摸牌了，这笔账就翻篇
+        if self.after_kan is not None and not (kan and seat == self.after_kan):
+            self.after_kan = None
         self.last_draw = (seat, tile)      # 摸一张记一张：荒庄时最后一张明牌归谁，就靠这个
         self._emit(Event("kan_draw" if kan else "draw", seat, tile, {"wall": len(self.wall)}))
         self.phase = "discard"
@@ -489,7 +515,7 @@ class Game:
 
     # ---------- 结束 ----------
     def _end_win(self, seat: int, tile: int | None, *, zimo: bool, from_seat: int | None = None,
-                 rob: bool = False, bloom: bool = False) -> None:
+                 rob: bool = False, bloom: bool = False, kan_draw: bool = False) -> None:
         self.phase = "ended"
         self.result = {
             "type": "win",
@@ -499,9 +525,12 @@ class Game:
             "from": from_seat,
             "rob": rob,
             "bloom": bloom,
-            "settle": self.settle({"seat": seat, "zimo": zimo, "from": from_seat}),
+            "kan_draw": kan_draw,
+            "settle": self.settle(seat, zimo=zimo, from_seat=from_seat, rob=rob,
+                                  bloom=bloom, kan_draw=kan_draw, tile=tile),
         }
-        self._emit(Event("win", seat, tile, {"zimo": zimo, "from": from_seat, "rob": rob, "bloom": bloom}))
+        self._emit(Event("win", seat, tile, {"zimo": zimo, "from": from_seat, "rob": rob,
+                                             "bloom": bloom, "kan_draw": kan_draw}))
 
     def _end_draw_game(self) -> None:
         self.phase = "ended"
@@ -511,9 +540,23 @@ class Game:
         self._emit(Event("draw_game", data={"reason": "wall_empty",
                                             "last_draw": self.result["last_draw"]}))
 
-    def settle(self, ctx: dict) -> dict:
-        """结算以后再说，现在把口子留给裁判。"""
-        return self.r.settle(ctx)
+    def settle(self, seat: int, *, zimo: bool, from_seat: int | None = None,
+               rob: bool = False, bloom: bool = False, kan_draw: bool = False,
+               tile: int | None = None) -> dict:
+        """收局那一刻把番算出来：番种表在 scoring.py，这里只负责凑上下文。"""
+        counts = list(self.hands[seat])
+        if not zimo and tile is not None:      # 点炮/抢杠：胡的那张不在手里，先并进来再判牌型
+            counts[tile] += 1
+        ctx = scoring.Context(
+            winner=seat, dealer=self.dealer, seats=self.cfg.seats,
+            zimo=zimo, from_seat=from_seat, rob=rob, bloom=bloom, kan_draw=kan_draw,
+            payer_just_kanned=from_seat is not None and from_seat == self.after_kan,
+            kans=self.kans[seat], melds=tuple(self.fixed[seat]),
+            counts=tuple(counts), closed_ting=self.ting_closed.get(seat, False),
+            melds_at_ting=len(self.fixed[seat]),
+            hand_tiles=max(0, sum(counts) - 1),   # 手里剩几张（不算胡的那张）
+        )
+        return scoring.settle(ctx).to_dict()
 
     # ---------- 观察 ----------
     def observe(self, seat: int) -> dict:
@@ -536,6 +579,10 @@ class Game:
             "can_win": (not self.dead_win[seat]) and self.r.is_win(tuple(self.hands[seat]), tuple(self.fixed[seat])).ok if self.phase == "discard" and self.turn == seat else False,
             "ting": {s: self.ting[s] for s in range(self.cfg.seats)},
             "dead": {s: self.dead_win[s] for s in range(self.cfg.seats)},
+            "dealer": self.dealer,
+            "dice": None if self.dice is None else [self.dice.a, self.dice.b, self.dice.total],
+            "kans": {s: self.kans.get(s, 0) for s in range(self.cfg.seats)},
+            "ting_closed": {s: bool((self.ting_closed or {}).get(s)) for s in range(self.cfg.seats)},
             "drawn": tile_id(self.drawn) if self.drawn is not None and seat == self.turn else None,
             "pending": None if d is None else {"seat": d.seat, "kind": d.kind},
             "result": self.result,
@@ -692,6 +739,7 @@ def _selftest() -> int:
         g.fixed[s] = []
         g.discards[s] = []
     p4, p9 = parse_tile("4饼"), parse_tile("9饼")
+    p5 = parse_tile("5饼")
     g.fixed[0] = [Meld("kan", (p4, p4, p4, p4))]
     g.hands[0] = _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼")
     g.wall = deque([parse_tile("1万")] * 5 + [p9])
@@ -893,12 +941,13 @@ def _selftest() -> int:
         g.hands[s] = [0] * KINDS
         g.fixed[s] = []
         g.discards[s] = []
-    g.hands[1] = _h("1万 2万 3万 4万 5万 6万 1条 2条 3条 9饼 9饼 7饼 7饼 7饼")
+    g.hands[1] = _h("1万 2万 3万 4万 5万 6万 1条 2条 3条 7饼 7饼 7饼 9饼")
     g.ting[1] = True
     g.wall.extend([parse_tile("1万")] * 20)
-    g.turn, g.phase, g.last, g.drawn = 1, "discard", None, p7
+    g.hands[1][p9] += 1                       # 真实流程里摸进来的那张是加进手牌的
+    g.turn, g.phase, g.last, g.drawn = 1, "discard", None, p9
     case("自摸能胡也有胡的选项", any(a.kind == "win" for a in g.pending().legal), True)
-    g.apply(Action("discard", tile=p7))
+    g.apply(Action("discard", tile=p9))
     case("自摸不胡也锁死", g.dead_win[1], True)
 
     # 锁死的人不能后开花
@@ -948,6 +997,7 @@ def _selftest() -> int:
     case("不开花不算弃胡", g.dead_win[0], False)
     g.hands[0] = _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼 9饼")   # 杠在桌上，所以手里 11 张就够胡
     g.ting[0] = True
+    g.drawn = p9                              # 摸进来的就是这张 9 饼（单钓）
     g.turn, g.phase, g.last = 0, "discard", None
     case("不开花之后照样能胡", any(a.kind == "win" for a in g.pending().legal), True)
 

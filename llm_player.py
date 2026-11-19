@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
+import seats
 from game import TOOLS, Decision, Game
 from referee import KINDS, RED, Action, parse_tile, tile_id, tile_name
 
@@ -365,11 +366,13 @@ class LLMPlayer:
         fixed = view.get("fixed") or []
         fixed_s = "；".join("/".join(m) for m in fixed) if fixed else "无"
         melds = {s: ms for s, ms in (view.get("melds") or {}).items() if ms}
-        others = "；".join(f"{s}号 " + "/".join("/".join(m) for m in ms) for s, ms in melds.items()) or "无"
-        table = "；".join(f"{s}号：{' '.join(t) if t else '—'}" for s, t in view["discards"].items())
+        others = "；".join(f"{seats.label(s)}号 " + "/".join("/".join(m) for m in ms) for s, ms in melds.items()) or "无"
+        table = "；".join(f"{seats.label(s)}号：{' '.join(t) if t else '—'}" for s, t in view["discards"].items())
         last = view.get("last")
-        last_s = f"{last['seat']}号 打了 {last['tile']}" if last else "—"
+        last_s = f"{seats.label(last['seat'])}号 打了 {last['tile']}" if last else "—"
         wall_s = f"牌墙还剩 {view['wall_left']} 张"
+        if view.get("dealer") is not None:
+            wall_s += f"；庄家 {seats.label(view['dealer'])} 号（庄家胡牌加一番）"
         if view.get("wall_last"):
             wall_s += f"，最后一张（明牌）是 {view['wall_last']}"
         if (view.get("dead") or {}).get(view["seat"]):
