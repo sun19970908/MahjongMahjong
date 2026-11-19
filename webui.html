@@ -156,6 +156,14 @@
     border-radius:9px;background:rgba(3,18,12,.35);font-size:12px;color:#bcd8c7;
   }
   .scorebar .round{color:var(--gold);font-weight:700;letter-spacing:.05em}
+  .speechbar{
+    display:flex;flex-wrap:wrap;gap:6px 14px;margin:-2px 0 8px;padding:6px 10px;
+    border:1px solid rgba(231,196,106,.2);border-radius:9px;
+    background:rgba(3,18,12,.35);font-size:12px;color:#e5f1e9;line-height:1.45;
+  }
+  .speech-item{display:flex;gap:5px;min-width:0}
+  .speech-item .who{color:var(--gold);font-weight:700;white-space:nowrap}
+  .speech-item .what{color:#dcefe4;overflow-wrap:anywhere}
   .scorebar .scores{display:flex;gap:10px;flex-wrap:wrap}
   .scorebar .score{white-space:nowrap}
   .scorebar .score b{color:#ffe6a8;font-weight:700}
@@ -267,6 +275,22 @@
     <span class="scores" id="score-text"></span>
   </div>
 
+  <div class="speechbar hidden" id="speechbar"></div>
+
+  <div class="chat-panel hidden" id="chat-panel">
+    <div class="chat-head">
+      <div><b>牌友聊天</b> <span id="chat-hint">暂停或一局结束时可以聊两句</span></div>
+      <button class="ghost" id="btn-chat-toggle">收起</button>
+    </div>
+    <div class="chat-body" id="chat-body">
+      <div class="chat-messages" id="chat-messages"></div>
+      <div class="chat-input-row">
+        <input id="chat-input" maxlength="300" placeholder="想跟牌友说两句…" autocomplete="off">
+        <button class="gold" id="chat-send">发送</button>
+      </div>
+    </div>
+  </div>
+
   <div class="table" id="table">
     <div class="slot top" id="slot-top"></div>
     <div class="slot left" id="slot-left"></div>
@@ -293,20 +317,6 @@
     <div class="my-hand" id="my-hand"></div>
     <div class="actions" id="actions"></div>
     <div class="hint" id="hint"></div>
-  </div>
-
-  <div class="chat-panel" id="chat-panel">
-    <div class="chat-head">
-      <div><b>牌友聊天</b> <span id="chat-hint">暂停或一局结束时可以聊两句</span></div>
-      <button class="ghost" id="btn-chat-toggle">收起</button>
-    </div>
-    <div class="chat-body" id="chat-body">
-      <div class="chat-messages" id="chat-messages"></div>
-      <div class="chat-input-row">
-        <input id="chat-input" maxlength="300" placeholder="想跟牌友说两句…" autocomplete="off">
-        <button class="gold" id="chat-send">发送</button>
-      </div>
-    </div>
   </div>
 </div>
 

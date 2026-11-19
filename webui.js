@@ -178,6 +178,26 @@
     }
   }
 
+  function renderSpeechBar() {
+    const bar = $("speechbar");
+    if (!bar) return;
+    const rows = (state && state.said) || [];
+    bar.replaceChildren();
+    bar.classList.toggle("hidden", !rows.length);
+    for (const s of rows) {
+      const item = document.createElement("div");
+      item.className = "speech-item";
+      const who = document.createElement("span");
+      who.className = "who";
+      who.textContent = (s.name || `${s.seat}号`) + "：";
+      const what = document.createElement("span");
+      what.className = "what";
+      what.textContent = s.text || "";
+      item.append(who, what);
+      bar.appendChild(item);
+    }
+  }
+
   function renderCenter() {
     const main = $("center-main");
     const sub = $("center-sub");
@@ -250,10 +270,6 @@
     log.replaceChildren();
     const rows = [];
     if (state.log && state.log.length) rows.push(...state.log.slice(-3));
-    if (state.said && state.said.length) {
-      const s = state.said[state.said.length - 1];
-      rows.push(`${s.name || s.seat + "号"}：${s.text}`);
-    }
     for (const row of rows) {
       const line = document.createElement("div");
       line.textContent = row;
@@ -396,6 +412,7 @@
     const hint = $("chat-hint");
     if (!state || !state.ok) {
       messages.replaceChildren();
+      panel.classList.add("hidden");
       input.disabled = true;
       send.disabled = true;
       hint.textContent = "等牌桌";
@@ -429,6 +446,7 @@
 
     const canChat = !!state.can_chat;
     const inChatMoment = !!(state.paused || state.awaiting_next || state.finished || state.result);
+    panel.classList.toggle("hidden", !canChat || !inChatMoment);
     input.disabled = !canChat || !inChatMoment || busy;
     send.disabled = input.disabled;
     if (!canChat) hint.textContent = "这桌没有能说话的座位";
@@ -441,6 +459,7 @@
     if (!state.paused && !state.awaiting_next && !state.finished) {
       chatAutoOpened = false;
     }
+    body.classList.toggle("hidden", chatCollapsed);
   }
 
   function resultKey(result, info) {
@@ -573,6 +592,7 @@
     $("btn-settings").disabled = false;
 
     renderScorebar();
+    renderSpeechBar();
     if (!state.ok) {
       renderCenter();
       $("my-hand").replaceChildren();
