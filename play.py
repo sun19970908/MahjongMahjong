@@ -195,14 +195,8 @@ def settle_block(result: dict | None) -> list[str]:
             f"{f['label']}" + (f"×{f['fan']}" if f.get("fan", 1) > 1 else "") for f in fans)
         out.append(paint(line, DIM))
     payers = s.get("payers") or {}
-    payer_fans = s.get("payer_fans") or {}
     if payers:
-        items = []
-        for k, v in payers.items():
-            own = payer_fans.get(k) or []
-            tag = f"（{'、'.join(f['label'] for f in own)}）" if own else ""
-            items.append(f"{seats_mod.label(int(k))}号{tag} 付 {v} 分")
-        out.append("  " + "  ".join(items))
+        out.append("  " + "  ".join(f"{seats_mod.label(int(k))}号 付 {v} 分" for k, v in payers.items()))
     return out
 
 

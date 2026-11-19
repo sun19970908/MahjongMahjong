@@ -612,7 +612,7 @@ class Game:
         elif from_seat is not None:
             payers.append(scoring.Payer(
                 from_seat, dealer=from_seat == self.dealer,
-                discard=not rob, men=self._men(from_seat),
+                discard=True, men=self._men(from_seat),
                 hand_tiles=sum(self.hands[from_seat]),
                 tears=rob or from_seat == self.after_kan))
         ctx = scoring.Context(
@@ -901,6 +901,8 @@ def _selftest() -> int:
     case("抢杠的选项里有胡", [a.kind for a in d.legal], ["win", "pass"])
     g.apply(next(a for a in d.legal if a.kind == "win"))
     case("抢杠胡成立", (g.result["type"], g.result["seat"], g.result["rob"]), ("win", 1, True))
+    codes = [f["code"] for f in g.result["settle"]["fans"]]
+    case("抢杠结算：点炮和流泪都在", ("discard" in codes, "tears" in codes), (True, True))
     case("没报听的人抢不了杠", rob_setup(listen=False).phase, "kan_draw")
 
     # 6b 手里四张直接亮出来杠，别人能抢
