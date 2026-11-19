@@ -191,7 +191,8 @@ def describe(a: Action) -> str:
     if a.kind == "pon":
         return f"碰{face(tile_id(a.tile))[0].strip()}"
     if a.kind == "kan":
-        return f"杠{face(tile_id(a.tile))[0].strip()}"
+        label = "加杠" if (a.meta or {}).get("kind") == "added" else "杠"
+        return f"{label}{face(tile_id(a.tile))[0].strip()}"
     if a.kind == "chi":
         return "吃" + "+".join(face(tile_id(t))[0].strip() for t in a.combo)
     return {"win": "胡！", "bloom": "后开花！", "pass": "过", "draw": "摸牌", "ting": "报听"}.get(a.kind, a.kind)
