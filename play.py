@@ -128,6 +128,8 @@ def screen(game: Game, me: int, buddy: int, status: str, log: list[str],
             head += paint(" ◆庄", MINE)
         if v.get("ting", {}).get(s):
             head += paint(" ●报听", MINE)
+        if v.get("piao", {}).get(s):
+            head += paint(" ●飘", MINE)
         if v.get("ting_closed", {}).get(s):
             head += paint("·闭门", DIM)
         if (game.kans or {}).get(s):

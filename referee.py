@@ -20,7 +20,7 @@
     胡牌条件：手里有且仅有一个对子 / 必须有刻子 双红中可以充当刻子 /
               必须有幺九 红中可以充当幺九 / 万饼条必须都有 /
               不能有两张或以上胡牌 飘胡除外
-    飘胡：手里只有刻子或对子
+    飘胡：整手只有刻子或对子，附露也不能有顺子
 """
 
 from __future__ import annotations
@@ -728,6 +728,7 @@ def _selftest() -> int:
     ph = "1万 1万 1万 2饼 2饼 2饼 3条 3条 3条 4条 4条 5条 5条"
     tp = r.tenpai(_h(ph))
     case("飘胡双碰听获豁免", (tp.ok, tp.code, tp.piao_hu), (True, "PIAO_HU_EXEMPT", True))
+    case("飘胡附露有顺子不算飘", is_piao_hu(_h(ph), (Meld("seq", (7, 8, 9)),)), False)
 
     # 7 无刻子 → 不胡
     nt = "1万 1万 2万 3万 4万 5万 6万 7万 7饼 8饼 9饼 4条 5条 6条"

@@ -43,7 +43,7 @@ WIN_FANS: tuple[Fan, ...] = (
     Fan("si_gui", "四归一", "一种牌整手凑齐四张，可叠加"),
     Fan("san_hong", "三红中", "凑够三张红中"),
     Fan("hand_one", "手把一", "四组面子全亮出去，手里只剩一张等将"),
-    Fan("piao", "飘胡", "整手只有刻子和对子，没有顺子"),
+    Fan("piao", "飘胡", "整手只有刻子和对子，附露也不能有顺子"),
     Fan("front_bloom", "前开花", "杠后补张那一下马上自摸"),
     Fan("back_bloom", "后开花", "胡的是牌墙最后一张"),
     Fan("sanqing", "三清", "另外三家全闷"),
@@ -304,7 +304,7 @@ def _selftest() -> int:
     for i, n in ((0, 3), (10, 3), (20, 3), (21, 2), (22, 2)):
         piao[i] = n
     s = settle(Context(**base, counts=tuple(piao), payers=[Payer(1, discard=True)]))
-    case("飘胡", "piao" in codes(s), True)
+    case("飘胡自动算番", "piao" in codes(s), True)
 
     case("封顶 8 番", points_for(15), points_for(8))
     print(f"\n共 {fails} 条失败")

@@ -35,6 +35,7 @@ from referee import (
     RuleConfig,
     RULES_V1,
     counts_from,
+    is_piao_hu,
     parse_tile,
     tile_id,
     tile_name,
@@ -91,7 +92,7 @@ TOOLS: list[dict] = [
     _tool("win", "宣布胡牌", {}, []),
     _tool("bloom", "后开花：杠完补张那一下，牌墙最后一张正好能胡，就取它胡，不来牌头补", {}, []),
     _tool("pass", "过，不要这张牌", {}, []),
-    _tool("ting", "报听。手牌已经听牌、想锁死手牌等胡，就调它", {}, []),
+    _tool("ting", "报听。手牌已经听牌、想锁死手牌等胡，就调它；飘胡由状态自动标记", {}, []),
     NOTE_TOOL,
     PAUSE_TOOL,
 ]
@@ -183,6 +184,7 @@ class Game:
         self.rob_kind: str | None = None                               # 哪种杠被抢：in_hand / added
         self.result: dict | None = None
         self.ting: dict[int, bool] = {s: False for s in range(config.seats)}   # 谁报听了
+        self.piao: dict[int, bool] = {s: False for s in range(config.seats)}   # 谁的状态是飘胡
         self.ting_closed: dict[int, bool] = {s: False for s in range(config.seats)}  # 报听那一刻是不是闭门
         self.kans: dict[int, int] = {s: 0 for s in range(config.seats)}        # 谁杠了几次（结算用）
         self.dead_win: dict[int, bool] = {s: False for s in range(config.seats)}  # 谁放过胡了：本局不准再胡
@@ -367,9 +369,11 @@ class Game:
             raise RuntimeError(f"报听阶段只接受 ting / pass，收到 {action.kind}")
         if action.kind == "ting":
             self.ting[seat] = True
+            self.piao[seat] = is_piao_hu(tuple(self.hands[seat]), tuple(self.fixed[seat]))
             self.ting_closed[seat] = not self.fixed[seat]      # 报听那一刻没副露 → 闭门听 + 闷
             waits = [tile_id(t) for t in self.r.waits(self.hands[seat], self.fixed[seat])]
-            self._emit(Event("ting", seat, data={"waits": waits, "closed": self.ting_closed[seat]}))
+            self._emit(Event("ting", seat, data={"waits": waits, "closed": self.ting_closed[seat],
+                                                 "piao": self.piao[seat]}))
         # 报完（或不报）再让下家反应 / 摸牌
         self._build_reactors(self.last[0], self.last[2])
         return self.drain_events()
@@ -603,6 +607,8 @@ class Game:
         for m in self.fixed[seat]:
             for t in m.tiles:
                 all_counts[t] += 1
+        # 飘胡不用谁口头声明：收局时按牌型直接打状态标记，结算也认这个形状。
+        self.piao[seat] = is_piao_hu(tuple(counts), tuple(self.fixed[seat]))
         payers = []
         for s in range(self.cfg.seats):
             if s == seat:
@@ -644,6 +650,7 @@ class Game:
             "last": None if self.last is None else {"seat": self.last[0], "tile": tile_id(self.last[2])},
             "can_win": (not self.dead_win[seat]) and self.r.is_win(tuple(self.hands[seat]), tuple(self.fixed[seat])).ok if self.phase == "discard" and self.turn == seat else False,
             "ting": {s: self.ting[s] for s in range(self.cfg.seats)},
+            "piao": {s: self.piao[s] for s in range(self.cfg.seats)},
             "dead": {s: self.dead_win[s] for s in range(self.cfg.seats)},
             "dealer": self.dealer,
             "dice": None if self.dice is None else [self.dice.a, self.dice.b, self.dice.total],
