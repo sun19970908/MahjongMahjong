@@ -22,6 +22,17 @@ python play.py --demo --offline                  # 不调模型，四家随机�
 python board.py --watch 2        # 每 2 秒把 state.json 画成 桌面.html
 ```
 
+网页牌桌（浏览器里直接打 1 号）：
+
+```bash
+python webui.py                  # 默认 1号网页、2号牌友、3/4随机；有未完成存档就接着打
+python webui.py --new            # 强制新开一桌
+python webui.py --resume         # 强制接当前 state.json
+python webui.py --port 8765      # 换端口
+```
+
+网页只拿 1 号视角：自己的手牌、四家公开的副露/牌河/报听/杠；别家的手牌只显示张数，别人报听不显示在等什么。`play.py` 的 `--no-chat` 是给网页模式用的，跳过局间/终场聊天，避免子进程卡在 `input()`。
+
 牌面贴图在 `tiles/`（公共领域，来源见 `tiles/README.md`），会被烘进 HTML，单文件就能带走。
 
 ## 快照与回退
@@ -50,6 +61,7 @@ python rollback.py --latest     # 回到最近一帧
 | `state.py` | 存档/读档（含庄家、骰子、杠数、闭门听这些新字段），以及每步快照。 |
 | `rollback.py` | 列出/恢复每步快照。 |
 | `board.py` | 把存档画成网页桌面。 |
+| `webui.py` / `webui.html` / `webui.js` | 本地网页牌桌：起停 `play.py`、读存档、转动作；只暴露 1 号视角。 |
 | `seat_io.py` / `watch.py` | 外部座位的文件协议 / 自动手。 |
 
 ## 座位文件协议（外部座位）

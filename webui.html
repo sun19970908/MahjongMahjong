@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>四人麻将 · 网页牌桌</title>
+<style>
+  :root{
+    --felt:#0d3b2a;
+    --felt-2:#14523a;
+    --wood:#4a2a17;
+    --wood-2:#7b4a29;
+    --cream:#f5ecd2;
+    --ink:#1c211c;
+    --muted:#a9c9b7;
+    --gold:#e7c46a;
+    --red:#d9534f;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; color:#f4f2e8;
+    font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+    background:radial-gradient(circle at 50% 0%,#173b31 0%,#0b1713 62%,#070d0b 100%);
+    min-height:100vh;
+  }
+  .wrap{max-width:1180px;margin:0 auto;padding:16px 18px 38px}
+  .topbar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:12px}
+  .brand{display:flex;align-items:baseline;gap:12px}
+  h1{font-size:22px;margin:0;letter-spacing:.12em;font-weight:700;color:var(--cream)}
+  .status{font-size:13px;color:var(--muted)}
+  .status .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#59d18b;margin-right:7px;box-shadow:0 0 10px #59d18b}
+  .status.stopped .dot{background:#8b8b8b;box-shadow:none}
+  .top-actions{display:flex;gap:8px;flex-wrap:wrap}
+  button{
+    font:inherit;cursor:pointer;border:0;border-radius:9px;padding:8px 12px;
+    background:#224f3d;color:#eaf4ee;border:1px solid #3c765d;
+    transition:transform .08s ease,background .15s ease,opacity .15s ease;
+  }
+  button:hover{background:#2c654d}
+  button:active{transform:translateY(1px)}
+  button:disabled{opacity:.45;cursor:not-allowed;transform:none}
+  button.gold{background:linear-gradient(180deg,#f1d486,#d7ae4d);color:#281d08;border-color:#f3dc9b;font-weight:700}
+  button.gold:hover{background:linear-gradient(180deg,#ffe4a3,#e1b85a)}
+  button.ghost{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.16)}
+  button.danger{background:#4d2623;border-color:#89524c;color:#ffd8d3}
+
+  .table{
+    position:relative;display:grid;
+    grid-template-columns:190px minmax(0,1fr) 190px;
+    grid-template-rows:118px minmax(0,1fr) 118px;
+    grid-template-areas:". top ." "left center right" ". bottom .";
+    gap:10px;padding:18px;
+    min-height:540px;height:min(60vh,650px);
+    background:
+      radial-gradient(circle at 50% 45%, #1c6447 0%, #124932 42%, #0a2d20 100%);
+    border:13px solid var(--wood);
+    border-radius:26px;
+    box-shadow:0 22px 55px rgba(0,0,0,.55), inset 0 0 0 2px rgba(255,255,255,.07),
+               inset 0 0 40px rgba(0,0,0,.35);
+  }
+  .table:before{
+    content:"";position:absolute;inset:12px;border-radius:15px;
+    border:1px solid rgba(255,255,255,.08);pointer-events:none;
+  }
+  .slot{min-width:0;min-height:0;z-index:1}
+  .slot.top{grid-area:top}
+  .slot.left{grid-area:left}
+  .slot.right{grid-area:right}
+  .slot.bottom{grid-area:bottom}
+  .center{grid-area:center;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;min-width:0;z-index:1}
+  .seat-panel{
+    height:100%;min-height:0;background:rgba(2,12,8,.28);
+    border:1px solid rgba(255,255,255,.13);border-radius:12px;padding:7px 8px;
+    display:flex;flex-direction:column;gap:4px;overflow:auto;scrollbar-width:thin;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.05);
+  }
+  .seat-panel.me{background:rgba(2,12,8,.38);border-color:rgba(231,196,106,.35)}
+  .seat-panel::-webkit-scrollbar{width:3px;height:3px}
+  .seat-panel::-webkit-scrollbar-thumb{background:#3b7058;border-radius:3px}
+  .seat-panel::-webkit-scrollbar-track{background:transparent}
+  .seat-head{display:flex;align-items:center;gap:5px;flex-wrap:wrap;font-size:13px;color:#d8efe2;line-height:1.3}
+  .seat-head .who{font-weight:700;color:var(--cream)}
+  .seat-head .turn{color:#ffd77a}
+  .badges{display:flex;gap:3px;flex-wrap:wrap}
+  .badge{font-size:10px;line-height:1;padding:3px 5px;border-radius:5px;background:rgba(255,255,255,.11);color:#dff5e9;white-space:nowrap}
+  .badge.dealer{background:#8d5b13;color:#ffe9b0}
+  .badge.ting{background:#3d254d;color:#efd4ff}
+  .badge.piao{background:#533b17;color:#ffe0a0}
+  .badge.dead{background:#3f2421;color:#ffb9b1}
+  .backs{display:flex;flex-wrap:nowrap;gap:1px;min-height:18px;align-content:flex-start;overflow:hidden}
+  .back{
+    width:12px;height:18px;border-radius:3px;flex:0 0 auto;
+    background:linear-gradient(135deg,#2c7a56,#14503a);
+    border:1px solid #6bb38c;box-shadow:inset 0 0 0 2px rgba(0,0,0,.18),0 1px 0 #06150e;
+  }
+  .back.own{background:linear-gradient(135deg,#ecdcae,#cdb56f);border-color:#fff1c7}
+  .tile{
+    width:32px;height:44px;border-radius:4px;flex:0 0 auto;
+    background-color:#fdfaf0;background-size:contain;background-repeat:no-repeat;background-position:center;
+    border:1px solid #d8cfb6;box-shadow:0 2px 0 #b7ac91,0 3px 5px rgba(0,0,0,.22);
+    transition:transform .08s ease,box-shadow .08s ease;
+  }
+  .tile.small{width:22px;height:31px;box-shadow:0 1px 0 #b7ac91}
+  .tile.mini{width:17px;height:24px;box-shadow:0 1px 0 #b7ac91}
+  .tile.clickable{cursor:pointer}
+  .tile.clickable:hover{transform:translateY(-4px);box-shadow:0 5px 0 #b7ac91,0 8px 12px rgba(0,0,0,.3)}
+  .tile.drawn{outline:2px solid var(--gold);outline-offset:1px}
+  .tile-row{display:flex;flex-wrap:wrap;gap:3px;align-items:flex-start}
+  .meld-group{display:flex;gap:2px;padding:2px 3px;border-radius:4px;background:rgba(255,255,255,.05)}
+  .melds{display:flex;flex-wrap:wrap;gap:5px;min-height:24px}
+  .river{display:flex;flex-wrap:wrap;gap:2px;align-content:flex-start}
+  .seat-empty{font-size:11px;color:#78a68e}
+
+  .center-card{
+    width:min(100%,390px);text-align:center;background:rgba(3,18,12,.48);
+    border:1px solid rgba(231,196,106,.28);border-radius:14px;padding:11px 15px;
+    box-shadow:0 10px 25px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.07);
+  }
+  .center-title{font-size:12px;color:var(--gold);letter-spacing:.18em;margin-bottom:5px}
+  .center-main{font-size:20px;font-weight:700;color:#f8f3df;line-height:1.35}
+  .center-sub{font-size:12px;color:var(--muted);margin-top:5px;line-height:1.55}
+  .center-wall{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:8px;color:#d6eadc;font-size:13px}
+  .center-wall b{font-size:22px;color:var(--gold);font-weight:700}
+  .center-last{display:flex;align-items:center;justify-content:center;gap:6px;margin-top:7px;font-size:12px;color:#c9dfd1}
+  .center-log{margin-top:8px;font-size:11px;color:#8db7a0;line-height:1.5;max-height:50px;overflow:hidden}
+
+  .my-area{margin-top:14px;padding:12px 14px 14px;background:rgba(7,29,21,.62);border:1px solid #315c48;border-radius:16px}
+  .my-head{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;color:var(--muted);margin-bottom:8px}
+  .my-head .label{color:var(--cream);font-weight:700}
+  .my-melds{display:flex;flex-wrap:wrap;gap:6px;min-height:26px;margin-bottom:7px}
+  .my-hand{display:flex;gap:5px;overflow-x:auto;padding:6px 2px 10px;min-height:66px;scrollbar-width:thin}
+  .my-hand .tile{width:44px;height:61px}
+  .my-hand .tile.clickable:hover{transform:translateY(-6px)}
+  .actions{display:flex;flex-wrap:wrap;gap:7px;min-height:36px;align-items:center}
+  .hint{font-size:12px;color:#9dc3ad;margin-top:8px;min-height:18px}
+  .hint.warn{color:#ffd08a}
+
+  .modal{position:fixed;inset:0;background:rgba(2,7,5,.72);display:flex;align-items:center;justify-content:center;padding:20px;z-index:20}
+  .modal.hidden{display:none}
+  .modal-card{width:min(92vw,560px);max-height:88vh;overflow:auto;background:linear-gradient(160deg,#174f39,#0c2a1d);border:1px solid #6b9478;border-radius:18px;box-shadow:0 28px 80px rgba(0,0,0,.65);padding:18px 20px}
+  .modal-title{font-size:18px;color:var(--gold);font-weight:700;margin:0 0 7px}
+  .modal-text{font-size:14px;line-height:1.65;color:#f5f1df}
+  .modal-label{font-size:12px;color:#a9c9b7;margin:13px 0 5px}
+  .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+  .fans{display:flex;flex-wrap:wrap;gap:6px}
+  .fan{font-size:11px;padding:3px 6px;border-radius:5px;background:rgba(255,255,255,.1);color:#ffe8ab}
+  .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1b3a2b;border:1px solid #4b8063;color:#e9f5ed;padding:9px 14px;border-radius:9px;font-size:13px;z-index:30;opacity:0;pointer-events:none;transition:opacity .2s ease;max-width:90vw}
+  .toast.show{opacity:1}
+
+  @media (max-width:820px){
+    .wrap{padding:10px}
+    .table{grid-template-columns:110px minmax(0,1fr) 110px;grid-template-rows:108px minmax(0,1fr) 108px;padding:11px;border-width:9px;min-height:440px;height:54vh}
+    h1{font-size:18px}
+    .center-main{font-size:16px}
+    .tile.small{width:19px;height:27px}
+    .tile.mini{width:15px;height:21px}
+    .my-hand .tile{width:36px;height:50px}
+    .seat-head{font-size:11px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand">
+      <h1>四人麻将</h1>
+      <div class="status" id="status"><span class="dot"></span>正在连接牌桌…</div>
+    </div>
+    <div class="top-actions">
+      <button class="ghost" id="btn-new">新开一桌</button>
+      <button class="ghost" id="btn-resume">接着打</button>
+      <button class="ghost danger" id="btn-quit">停止牌桌</button>
+    </div>
+  </div>
+
+  <div class="table" id="table">
+    <div class="slot top" id="slot-top"></div>
+    <div class="slot left" id="slot-left"></div>
+    <div class="slot right" id="slot-right"></div>
+    <div class="slot bottom" id="slot-bottom"></div>
+    <div class="center" id="center">
+      <div class="center-card">
+        <div class="center-title">牌 桌</div>
+        <div class="center-main" id="center-main">等牌局</div>
+        <div class="center-sub" id="center-sub"></div>
+        <div class="center-wall" id="center-wall"></div>
+        <div class="center-last" id="center-last"></div>
+        <div class="center-log" id="center-log"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="my-area">
+    <div class="my-head">
+      <div><span class="label">你的手牌</span> <span id="my-count"></span></div>
+      <div id="my-tip"></div>
+    </div>
+    <div class="my-melds" id="my-melds"></div>
+    <div class="my-hand" id="my-hand"></div>
+    <div class="actions" id="actions"></div>
+    <div class="hint" id="hint"></div>
+  </div>
+</div>
+
+<div class="modal hidden" id="modal">
+  <div class="modal-card">
+    <h2 class="modal-title" id="modal-title">收局</h2>
+    <div class="modal-text" id="modal-text"></div>
+    <div class="modal-label" id="modal-label"></div>
+    <div class="fans" id="modal-fans"></div>
+    <div class="modal-label" id="modal-hand-label">赢家牌</div>
+    <div class="tile-row" id="modal-hand"></div>
+    <div class="modal-label" id="modal-melds-label">副露</div>
+    <div class="melds" id="modal-melds"></div>
+    <div class="modal-actions">
+      <button class="ghost" id="modal-close">看看牌桌</button>
+      <button class="gold" id="modal-new">再来一局</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="/webui.js"></script>
+</body>
+</html>

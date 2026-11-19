@@ -41,6 +41,7 @@ ESC = "\x1b["
 BORDER, WAN, PIN, SUO, ZHONG, DIM, MINE = 90, 31, 34, 32, 91, 37, 36
 COLOR = True
 VT_OK = True
+NO_CHAT = False
 
 
 def enable_vt() -> bool:
@@ -317,6 +318,9 @@ def pause_talk(talker, buddy: str, opener: str, actor: str = "") -> None:
     print()
     if opener:
         print(f" {actor or buddy}：{opener}")
+    if NO_CHAT:
+        print(paint(" （网页模式：跳过中场聊天）", DIM))
+        return
     if not talker:
         print(paint(" （这桌没有能说话的座位，直接接着打）", DIM))
         return
@@ -334,7 +338,7 @@ def pause_talk(talker, buddy: str, opener: str, actor: str = "") -> None:
 
 
 def main() -> int:
-    global COLOR, VT_OK
+    global COLOR, VT_OK, NO_CHAT
     ap = argparse.ArgumentParser()
     ap.add_argument("--seat", type=int, default=1, help="你坐几号（1 起）")
     ap.add_argument("--buddy", type=int, default=None, help="牌友坐几号，默认你下家")
@@ -355,9 +359,11 @@ def main() -> int:
     ap.add_argument("--cache", action="store_true", help="每次请求后打一行缓存命中率，结束给总账")
     ap.add_argument("--trace", action="store_true", help="每步一行 JSONL，事后复盘")
     ap.add_argument("--resume", action="store_true", help="接上次那一手接着打（读 state.json）")
+    ap.add_argument("--no-chat", action="store_true", help="不进入局间/终场聊天，网页模式用")
     ap.add_argument("--no-save", action="store_true", help="不写 state.json")
     args = ap.parse_args()
 
+    NO_CHAT = args.no_chat
     VT_OK = enable_vt()
     COLOR = not args.no_color and VT_OK and sys.stdout.isatty()
 
@@ -375,10 +381,16 @@ def main() -> int:
         you_no = old_seat(meta.get("you"))
         buddy_no = old_seat(meta.get("buddy"))
         agent_no = old_seat(meta.get("agent"))
-        plans = plan_from_flags(seats=game.cfg.seats, human=you_no,
-                                buddy=buddy_no, agent=agent_no)
-        if any((args.seat != 1, args.buddy, args.agent, args.players)):
-            print(" 接管存档：座位按存档里的来，--seat/--buddy/--agent 这轮不算")
+        if args.players:
+            # 网页接管：存档里的座位类型可能已经过期，允许用 --players 重排，
+            # 但牌局状态、步数、快照都沿用原存档。
+            plans = parse_players(args.players, game.cfg.seats)
+            print(" 接管存档：牌局沿用存档，座位按 --players 重排")
+        else:
+            plans = plan_from_flags(seats=game.cfg.seats, human=you_no,
+                                    buddy=buddy_no, agent=agent_no)
+            if any((args.seat != 1, args.buddy, args.agent)):
+                print(" 接管存档：座位按存档里的来，--seat/--buddy/--agent 这轮不算")
     else:
         game = None
         if args.players:
@@ -474,6 +486,8 @@ def main() -> int:
         for p in old:
             p.unlink(missing_ok=True)
     board = {s: 0 for s in range(n_seats)}        # 累计分，按座位下标记账
+    if not saved:
+        persist()                                  # 先落一帧，网页 UI 开局就有牌桌看
     rounds = max(1, args.rounds)
     winner = None
     stopped = False
@@ -492,6 +506,7 @@ def main() -> int:
             said.clear()
             log.clear()
             log.append(f"—— 第 {rnd + 1} 局：{seats_mod.label(nxt)} 号坐庄 ——")
+            persist()                              # 换局后先把新桌落盘
 
         while game.pending() is not None:
             d = game.pending()
@@ -593,33 +608,36 @@ def main() -> int:
             finished_all = True
         if talker and (game.result or ended_early):
             phase = "after" if last else "between"
-            if ended_early:
-                print("\n 提前结束，进入终场聊天。想跟牌友聊两句就直接打字，空行回车结束。")
-                print(" （现在可以改长期笔记了，改完下次开桌生效）")
-            elif last:
-                print("\n 所有局都打完了，进入终场聊天。想跟牌友聊两句就直接打字，空行回车结束。")
-                print(" （现在可以改长期笔记了，改完下次开桌生效）")
-            else:
-                print("\n 这一局打完了，下一局还没开。想跟牌友聊两句就直接打字，空行回车结束。")
-                print(" （现在只能追加长期笔记；想直接收场就打 /e，进入终场聊天）")
             bcast = round_broadcast(rnd + 1, rounds, res, board, buddy, ended_early)
-            print(f"\n 播报：{bcast}", flush=True)
-            print(f" {names.get(buddy) or ''}：{talker.chat(bcast, phase=phase)}", flush=True)
-            while True:
-                try:
-                    line = input(" 你：").strip()
-                except (EOFError, KeyboardInterrupt):
-                    print()
-                    break
-                if not line:
-                    break
-                if phase == "between" and line in ("/e", "提前结束"):
-                    ended_early = True
-                    finished_all = True
-                    phase = "after"
-                    print("\n 提前结束，进入终场聊天。现在可以改长期笔记了。")
-                    continue
-                print(f" {names.get(buddy) or ''}：{talker.chat(line, phase=phase)}", flush=True)
+            if NO_CHAT:
+                print(f"\n 播报：{bcast}", flush=True)
+            else:
+                if ended_early:
+                    print("\n 提前结束，进入终场聊天。想跟牌友聊两句就直接打字，空行回车结束。")
+                    print(" （现在可以改长期笔记了，改完下次开桌生效）")
+                elif last:
+                    print("\n 所有局都打完了，进入终场聊天。想跟牌友聊两句就直接打字，空行回车结束。")
+                    print(" （现在可以改长期笔记了，改完下次开桌生效）")
+                else:
+                    print("\n 这一局打完了，下一局还没开。想跟牌友聊两句就直接打字，空行回车结束。")
+                    print(" （现在只能追加长期笔记；想直接收场就打 /e，进入终场聊天）")
+                print(f"\n 播报：{bcast}", flush=True)
+                print(f" {names.get(buddy) or ''}：{talker.chat(bcast, phase=phase)}", flush=True)
+                while True:
+                    try:
+                        line = input(" 你：").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        print()
+                        break
+                    if not line:
+                        break
+                    if phase == "between" and line in ("/e", "提前结束"):
+                        ended_early = True
+                        finished_all = True
+                        phase = "after"
+                        print("\n 提前结束，进入终场聊天。现在可以改长期笔记了。")
+                        continue
+                    print(f" {names.get(buddy) or ''}：{talker.chat(line, phase=phase)}", flush=True)
 
         if stopped or ended_early:
             break
