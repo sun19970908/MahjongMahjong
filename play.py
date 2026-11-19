@@ -161,11 +161,16 @@ def screen(game: Game, me: int, buddy: int, status: str, log: list[str],
     out.append(f" 你的手牌（{len(v['hand'])} 张）")
     out += [" " + row for row in hand_block(v["hand"])]
     if pick:
-        if pick_kind == "discard" and all(a.kind == "discard" for a in pick):
-            # 手牌下边的序号就是牌的序号：同一种牌有两张时，两个序号都能打它。
-            by_tile = {parse_tile(a.tile): a for a in pick}
+        if pick_kind == "discard" and any(a.kind == "discard" for a in pick):
+            # 出牌阶段：序号永远是手牌位置。即使同时有杠/胡，也别退回动作顺序，
+            # 不然 p4、s6 这种重复牌会被压成一个，九条就从第 11 位变成第 9 位。
+            hand = list(v.get("hand") or [])
+            by_tile = {parse_tile(a.tile): a for a in pick if a.kind == "discard"}
             opts = [f"{i}.{describe(by_tile[parse_tile(t)])}"
-                    for i, t in enumerate(v["hand"], 1) if parse_tile(t) in by_tile]
+                    for i, t in enumerate(hand, 1) if parse_tile(t) in by_tile]
+            start = len(hand) + 1
+            for i, a in enumerate((a for a in pick if a.kind != "discard"), start):
+                opts.append(f"{i}.{describe(a)}")
         else:
             opts = []
             for i, a in enumerate(pick, 1):
