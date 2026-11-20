@@ -90,7 +90,7 @@
 
   function seatName(no) {
     const s = (state && state.seats || []).find((x) => x.no === no);
-    return s ? s.name : `${no}号`;
+    return s ? s.name + (s.wind ? "·" + s.wind : "") : `${no}号`;
   }
 
   function renderSeat(seat, slotName) {
@@ -103,7 +103,7 @@
     head.className = "seat-head";
     const who = document.createElement("span");
     who.className = "who";
-    who.textContent = seat.name;
+    who.textContent = seat.name + (seat.wind ? " · " + seat.wind : "");
     head.appendChild(who);
     if (state.turn === seat.no && !state.result && !state.finished) {
       const turn = document.createElement("span");
@@ -158,13 +158,20 @@
 
   function renderScorebar() {
     const round = $("round-text");
+    const context = $("context-text");
     const scores = $("score-text");
     scores.replaceChildren();
     if (!state || !state.ok) {
       round.textContent = "第 — 局";
+      context.textContent = "LLM上下文 —/—";
       return;
     }
-    round.textContent = `第 ${state.round || 1}/${state.rounds || 1} 局 · 第 ${state.steps || 0} 步`;
+    round.textContent = `第 ${state.round || 1} 局 · 第 ${state.steps || 0} 步`;
+    context.textContent = `LLM上下文 ${state.context_round || 1}/${state.context_rounds || state.rounds || 1}`;
+    if (state.context_cut_next) context.textContent += " · 下一局清空";
+    else if (!state.finished && (state.context_round || 1) >= (state.context_rounds || state.rounds || 1)) {
+      context.textContent += " · 本局后清空";
+    }
     const board = state.board || {};
     for (let no = 1; no <= 4; no++) {
       const span = document.createElement("span");
@@ -215,7 +222,10 @@
 
     const phase = state.phase_label || "?";
     let title = "等牌局";
-    let detail = `第 ${state.round || 1}/${state.rounds || 1} 局 · 第 ${state.steps || 0} 步 · ${phase}`;
+    let detail = `第 ${state.round || 1} 局 · 第 ${state.steps || 0} 步 · ${phase}`;
+    if (state.rounds) {
+      detail += ` · LLM上下文 ${state.context_round || 1}/${state.rounds}`;
+    }
     if (state.finished) {
       title = state.round_info && state.round_info.ended_early ? "提前结束" :
         (state.result && state.result.type === "draw_game") ? "荒庄" : "本局结束";
@@ -288,6 +298,18 @@
     }
     $("my-tip").textContent = tip.join(" · ");
 
+    const tingHint = $("ting-hint");
+    if (tingHint) {
+      const hints = state.ting_hints || [];
+      if (hints.length) {
+        tingHint.textContent = "听牌提醒：" + hints.map((h) => h.text).join("；");
+        tingHint.classList.remove("hidden");
+      } else {
+        tingHint.textContent = "";
+        tingHint.classList.add("hidden");
+      }
+    }
+
     renderMelds($("my-melds"), me ? me.melds : [], "副露 —");
 
     const hand = $("my-hand");
@@ -326,26 +348,31 @@
     const endBtn = $("btn-end");
     const undoBtn = $("btn-undo");
     const nextBtn = $("btn-next");
-    nextBtn.classList.toggle("hidden", !(state && state.awaiting_next));
-    nextBtn.disabled = !(state && state.awaiting_next);
+    const canNext = !!(state && (state.awaiting_next || (state.finished && state.result)));
+    nextBtn.classList.toggle("hidden", !canNext);
+    nextBtn.disabled = !canNext;
     if (!state || !state.ok) {
       pauseBtn.disabled = true;
       endBtn.disabled = true;
       undoBtn.disabled = true;
       pauseBtn.textContent = "暂停";
+      endBtn.textContent = "提前结束上下文";
       hint.textContent = state && state.message ? state.message : "正在等牌桌…";
       return;
     }
 
     pauseBtn.textContent = state.paused ? "继续" : "暂停";
     pauseBtn.disabled = !(state.paused || (state.pending && state.pending.seat === state.own_seat));
-    endBtn.disabled = !state.running || state.finished;
+    endBtn.textContent = state.context_cut_next ? "上下文已结束" : "提前结束上下文";
+    endBtn.disabled = !state.awaiting_next || !!state.context_cut_next;
     undoBtn.disabled = !(state.running || state.finished);
 
     if (state.finished) {
-      hint.textContent = state.round_info && state.round_info.ended_early
-        ? "这一场提前结束了。"
-        : "本局结束，可以看结算或再开一桌。";
+      hint.textContent = state.result
+        ? "本局结束，可以直接点“下一局”；只有“新开一桌”才重置。"
+        : (state.round_info && state.round_info.ended_early
+          ? "这一场提前结束了。"
+          : "本局结束，可以看结算或再开一桌。");
       return;
     }
     if (state.paused) {
@@ -353,7 +380,13 @@
       return;
     }
     if (state.awaiting_next) {
-      hint.textContent = "本局已结算，点结算里的“下一局”。";
+      if (state.context_cut_next) {
+        hint.textContent = "LLM 上下文已结束；现在聊天按轮次结束权限，可以追加或改长期笔记。记完点“下一局”清空。";
+      } else if ((state.context_round || 1) >= (state.context_rounds || state.rounds || 1)) {
+        hint.textContent = "这是 LLM 上下文窗口最后一局，下一局会清空；想改长期笔记点“提前结束上下文”后再聊。";
+      } else {
+        hint.textContent = "本局已结算；想改长期笔记点“提前结束上下文”后再聊。点“下一局”继续。";
+      }
       return;
     }
 
@@ -399,7 +432,7 @@
   function chatPhase() {
     if (!state) return "after";
     if (state.paused) return "pause";
-    if (state.awaiting_next) return "between";
+    if (state.awaiting_next) return state.context_cut_next ? "after" : "between";
     return "after";
   }
 
@@ -409,12 +442,14 @@
     const messages = $("chat-messages");
     const input = $("chat-input");
     const send = $("chat-send");
+    const target = $("chat-target");
     const hint = $("chat-hint");
     if (!state || !state.ok) {
       messages.replaceChildren();
       panel.classList.add("hidden");
       input.disabled = true;
       send.disabled = true;
+      if (target) target.disabled = true;
       hint.textContent = "等牌桌";
       return;
     }
@@ -434,7 +469,7 @@
         row.className = "chat-msg " + (m.role === "user" ? "user" : "buddy");
         const who = document.createElement("span");
         who.className = "who";
-        who.textContent = m.role === "user" ? "你" : (state.talker || "牌友");
+        who.textContent = m.role === "user" ? "你" : (m.name || state.talker || "牌友");
         row.appendChild(who);
         const text = document.createElement("div");
         text.textContent = m.text || "";
@@ -444,14 +479,30 @@
       messages.scrollTop = messages.scrollHeight;
     }
 
-    const canChat = !!state.can_chat;
+    const targets = state.chat_targets || [];
+    if (target) {
+      const wanted = target.value;
+      target.replaceChildren();
+      for (const t of targets) {
+        const opt = document.createElement("option");
+        opt.value = String(t.seat);
+        opt.textContent = t.name || `${t.seat}号`;
+        target.appendChild(opt);
+      }
+      if (Array.from(target.options).some((o) => o.value === wanted)) target.value = wanted;
+      else if (targets.length) target.value = String(targets[0].seat);
+    }
+
+    const canChat = !!state.can_chat && targets.length > 0;
     const inChatMoment = !!(state.paused || state.awaiting_next || state.finished || state.result);
     panel.classList.toggle("hidden", !canChat || !inChatMoment);
     input.disabled = !canChat || !inChatMoment || busy;
-    send.disabled = input.disabled;
+    send.disabled = input.disabled || !target || !target.value;
+    if (target) target.disabled = !canChat || !inChatMoment || busy;
     if (!canChat) hint.textContent = "这桌没有能说话的座位";
     else if (!inChatMoment) hint.textContent = "暂停或一局结束时可以聊";
-    else hint.textContent = state.paused ? "暂停中，聊完点“继续”" : "可以聊两句，也可直接看结算";
+    else if (state.context_cut_next) hint.textContent = "上下文已结束；现在可以追加或改长期笔记，聊完点“下一局”";
+    else hint.textContent = state.paused ? "暂停中，选人聊，聊完点“继续”" : "选人聊；第一次发消息会带上本局播报";
     if ((state.paused || state.awaiting_next) && !chatAutoOpened) {
       chatCollapsed = false;
       chatAutoOpened = true;
@@ -465,7 +516,8 @@
   function resultKey(result, info) {
     if (!result && !info) return "";
     const r = result || {};
-    return [info && info.round, info && info.steps, r.type, r.seat, r.tile, (r.hand || []).join("")]
+    return [info && info.round, info && info.steps, r.type, r.seat, r.tile, (r.hand || []).join(""),
+            state.context_cut_next ? "cut" : ""]
       .join("|");
   }
 
@@ -543,8 +595,13 @@
     }
 
     const next = $("modal-next");
-    next.classList.toggle("hidden", !state.awaiting_next);
-    next.disabled = !state.awaiting_next;
+    const canNext = !!(state.awaiting_next || (state.finished && state.result));
+    next.classList.toggle("hidden", !canNext);
+    next.disabled = !canNext;
+    const cut = $("modal-cut");
+    cut.classList.toggle("hidden", !state.awaiting_next);
+    cut.textContent = state.context_cut_next ? "上下文已结束" : "提前结束上下文";
+    cut.disabled = !state.awaiting_next || !!state.context_cut_next;
     $("modal").classList.remove("hidden");
     dismissedResult = key;
   }
@@ -562,7 +619,9 @@
     status.appendChild(dot);
     const text = document.createElement("span");
     if (state.finished) {
-      text.textContent = `这一场结束${state.error ? " · " + state.error : ""}`;
+      text.textContent = state.result
+        ? "本局结束 · 可继续下一局"
+        : `这一场结束${state.error ? " · " + state.error : ""}`;
     } else if (state.paused) {
       text.textContent = "牌局暂停";
     } else if (state.running) {
@@ -701,7 +760,6 @@
   function openSettings() {
     if (state && state.config) {
       $("set-players").value = state.config.players || "1=human,2=llm,3=random,4=random";
-      $("set-rounds").value = state.config.rounds || 1;
       $("set-dealer").value = state.config.dealer || "";
       $("set-base").value = state.config.base ?? 1;
       $("set-fan-cap").value = state.config.fan_cap ?? 8;
@@ -713,10 +771,26 @@
     $("settings-modal").classList.remove("hidden");
   }
 
+  function openContextSettings() {
+    $("set-context-rounds").value = state && state.ok
+      ? (state.context_rounds || state.rounds || 1)
+      : 1;
+    $("context-modal").classList.remove("hidden");
+  }
+
+  async function saveContextSettings() {
+    const rounds = Number($("set-context-rounds").value || 1);
+    const data = await post("/api/context-rounds", { rounds: rounds });
+    if (data && data.ok) {
+      $("context-modal").classList.add("hidden");
+      lastStateKey = "";
+      toast("LLM 上下文窗口已改为每 " + data.rounds + " 局清空。");
+    }
+  }
+
   async function startNewGame() {
     const body = {
       players: $("set-players").value.trim(),
-      rounds: Number($("set-rounds").value || 1),
       dealer: $("set-dealer").value.trim(),
       base: Number($("set-base").value || 1),
       fan_cap: Number($("set-fan-cap").value || 8),
@@ -754,9 +828,22 @@
   }
 
   async function endGame() {
-    if (!confirm("提前结束这一场？当前这局不结算。")) return;
+    if (!state || !state.awaiting_next) {
+      toast("只能在局间（本局结束、下一局开始前）用。");
+      return;
+    }
+    if (state.context_cut_next) {
+      toast("当前上下文已结束；聊完点“下一局”清空。");
+      return;
+    }
+    if (!confirm("结束当前 LLM 上下文窗口？会停在轮次结束状态，现在可以改长期笔记；点“下一局”时才清空对话。牌局、分数和座位都不动。")) return;
     const data = await post("/api/end", {});
-    if (data && data.ok) toast("已请求提前结束。");
+    if (data && data.ok) {
+      state.context_cut_next = true;
+      lastStateKey = "";
+      render();
+      toast(data.message || "当前上下文已结束；点“下一局”时清空。");
+    } else if (data && data.message) toast(data.message);
   }
 
   async function nextRound() {
@@ -771,10 +858,12 @@
   async function sendChat() {
     if (!state || !state.can_chat) return;
     const input = $("chat-input");
+    const target = $("chat-target");
     const text = input.value.trim();
-    if (!text) return;
+    const seat = target ? target.value : "";
+    if (!text || !seat) return;
     input.value = "";
-    const data = await post("/api/chat", { text: text, phase: chatPhase() });
+    const data = await post("/api/chat", { text: text, phase: chatPhase(), seat: Number(seat) });
     if (data && data.ok) {
       chatCollapsed = false;
       chatAutoOpened = true;
@@ -830,6 +919,7 @@
   $("btn-end").addEventListener("click", endGame);
   $("btn-next").addEventListener("click", nextRound);
   $("btn-undo").addEventListener("click", openUndo);
+  $("btn-context").addEventListener("click", openContextSettings);
   $("btn-settings").addEventListener("click", openSettings);
   $("btn-resume").addEventListener("click", resumeGame);
   $("btn-quit").addEventListener("click", quitGame);
@@ -844,8 +934,11 @@
   });
   $("settings-cancel").addEventListener("click", () => $("settings-modal").classList.add("hidden"));
   $("settings-start").addEventListener("click", startNewGame);
+  $("context-cancel").addEventListener("click", () => $("context-modal").classList.add("hidden"));
+  $("context-save").addEventListener("click", saveContextSettings);
   $("undo-cancel").addEventListener("click", () => $("undo-modal").classList.add("hidden"));
   $("modal-next").addEventListener("click", nextRound);
+  $("modal-cut").addEventListener("click", endGame);
   $("modal-close").addEventListener("click", () => $("modal").classList.add("hidden"));
   $("modal-new").addEventListener("click", () => {
     $("modal").classList.add("hidden");
@@ -856,6 +949,7 @@
     if (e.key === "Escape") {
       $("modal").classList.add("hidden");
       $("settings-modal").classList.add("hidden");
+      $("context-modal").classList.add("hidden");
       $("undo-modal").classList.add("hidden");
     }
   });

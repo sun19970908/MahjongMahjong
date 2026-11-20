@@ -68,11 +68,11 @@ class BasePlayer:
 
 
 class EndEarly(Exception):
-    """人在键盘上按了提前结束：不再打后面的局，直接收场。"""
+    """停止牌桌时叫醒阻塞输入；不是“提前结束上下文”。"""
 
 
 class HumanPlayer(BasePlayer):
-    """你：键盘输入。打 /p 就是要求中场暂停（返回 None），/e 提前结束整场。"""
+    """你：键盘输入。打 /p 就是要求中场暂停。"""
 
     def __init__(self, seat: int) -> None:
         super().__init__(seat)
@@ -90,8 +90,6 @@ class HumanPlayer(BasePlayer):
                 raise SystemExit("退了。")
             if raw in ("/p", "p", "暂停"):
                 return None, ""
-            if raw in ("/e", "提前结束"):
-                raise EndEarly()
             if raw.isdigit():
                 n = int(raw)
                 has_discard = any(a.kind == "discard" for a in opts)
@@ -133,7 +131,8 @@ class LLMSeat(BasePlayer):
     def __init__(self, seat: int, impl) -> None:
         super().__init__(seat)
         self.impl = impl
-        self.name = f"{seat}号（牌友）"
+        display = getattr(impl, "name", "") or f"{seat}号"
+        self.name = f"{display}（{seat}号）" if display != f"{seat}号" else f"{seat}号（牌友）"
         self.supports = "llm"
 
     def decide(self, d: Decision) -> tuple[Action | None, str]:
@@ -295,31 +294,55 @@ class SeatPlan:
             raise ValueError(f"座位号从 1 起，收到 {self.seat}")
 
 
+def _read_player_spec(spec: str) -> tuple[str, dict]:
+    """读一个玩家配置：kind 或 kind:玩家名。"""
+    kind, _, profile = spec.partition(":")
+    kind = kind.strip()
+    if kind not in KINDS and not profile.strip():
+        # 只写玩家名，默认按牌友处理
+        return "llm", {"profile": kind}
+    opts = {"profile": profile.strip()} if profile.strip() else {}
+    return kind, opts
+
+
 def parse_players(text: str, seats: int = 4) -> list[SeatPlan]:
     """把命令行的玩家配置读成计划。
 
-    两种写法：
-        "human,llm,external,random"  按 1..4 号依次排
-        "2=llm,3=external"           点名叫座，剩下的补随机
+    没写座位的项一律随机落座：
+    - "human,external,llm:夏栀,llm:方小满"：四个都随机
+    - "2=llm:夏栀,3=external"：2/3 点名，剩下的空位随机补
     """
     spec = (text or "").strip()
     if not spec:
         return [SeatPlan(s + 1, "random") for s in range(seats)]
-    assigns: dict[int, str] = {}
+    assigns: dict[int, tuple[str, dict]] = {}
+    pending: list[str] = []
+    items = [x.strip() for x in spec.split(",") if x.strip()]
     if "=" in spec:
-        for item in spec.split(","):
-            item = item.strip()
-            if not item:
+        for item in items:
+            if "=" not in item:
+                pending.append(item)
                 continue
-            left, _, kind = item.partition("=")
+            left, _, raw = item.partition("=")
             _check_seat(int(left.strip()), seats)
-            assigns[int(left.strip())] = kind.strip()
+            assigns[int(left.strip())] = _read_player_spec(raw)
     else:
-        for i, kind in enumerate((x.strip() for x in spec.split(",")), start=1):
-            if kind:
-                _check_seat(i, seats)
-                assigns[i] = kind
-    return [SeatPlan(s + 1, assigns.get(s + 1, "random")) for s in range(seats)]
+        pending = items
+
+    free = [s for s in range(1, seats + 1) if s not in assigns]
+    random.shuffle(free)
+    if len(pending) > len(free):
+        raise ValueError(f"没座位的玩家有 {len(pending)} 个，只剩 {len(free)} 个空位")
+    for item in pending:
+        kind, opts = _read_player_spec(item)
+        seat = free.pop(0)
+        assigns[seat] = (kind, opts)
+
+    plans: list[SeatPlan] = []
+    for s in range(seats):
+        kind, opts = assigns.get(s + 1, ("random", {}))
+        plans.append(SeatPlan(s + 1, kind, opts))
+    return plans
 
 
 def _check_seat(seat: int | None, seats: int) -> None:
@@ -359,10 +382,14 @@ class Table:
     def of_kind(self, kind: str) -> list[BasePlayer]:
         return [p for p in self.players.values() if p.kind == kind]
 
+    def chat_targets(self) -> list[BasePlayer]:
+        """能聊天的座位，不限 LLM；以后接真人只要实现 supports_talk/chat。"""
+        return [p for p in self.players.values() if p.supports_talk()]
+
     def talker(self) -> BasePlayer | None:
-        """中场能聊天的那个座位（现阶段就是牌友 LLM）。"""
-        llms = self.of_kind("llm")
-        return llms[0] if llms else None
+        """默认聊天对象：第一个能聊的座位。"""
+        targets = self.chat_targets()
+        return targets[0] if targets else None
 
 
 def build_players(plans: list[SeatPlan], *, seats: int = 4,

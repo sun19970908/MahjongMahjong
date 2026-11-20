@@ -50,6 +50,28 @@ python rollback.py --latest     # 回到最近一帧
 
 恢复前会把当前 `state.json` 备份成 `state.before-rollback.json`；停掉牌桌进程后，再运行 `python play.py --resume` 接着打。
 
+## 玩家档案（`profiles/<名字>/profile.json`）
+
+模型接入写在档案的 `llm` 段，每座牌友可以各配各的（参考 `G:\AI\livliv-pet\llm.config.json`）：
+
+```json
+{
+  "llm": {
+    "baseUrl": "http://127.0.0.1:11436/v1/chat/completions",
+    "apiKey": "",
+    "reasoningBudget": true,
+    "headers": {"Upstream-Url": "https://..."},
+    "request": {
+      "model": "strata-nothink",
+      "temperature": 0.0,
+      "max_tokens": 8192
+    }
+  }
+}
+```
+
+`llm.request` 里的参数会原样带给接口（如 `thinking`）；`model`、`messages`、`temperature` 每手由牌局覆盖，`max_tokens` 只认档案里这一份，代码不再按每手改它。`reasoningBudget` 是 Strata 的思考预算开关：`true` 才发 `reasoning_budget_tokens`，出牌提示里也会写“思考预算 N token”；接云端 OpenAI 兼容接口时设 `false`，请求和提示都不再提思考预算，只保留档案里的 `max_tokens` 输出上限。老的顶层 `model` 写法仍能读。
+
 ## 分层
 
 | 文件 | 管什么 |

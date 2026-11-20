@@ -17,7 +17,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core import CoreConfig, TableCore, action_label
 from game import Action, Game
-from players import EndEarly
 import seats as seats_mod
 
 NUM = "一二三四五六七八九"
@@ -111,7 +110,7 @@ def screen(game: Game, me: int, buddy: int, status: str, log: list[str],
     v = game.observe(me)
     out = [RULE]
     wall = f" 牌墙 {v['wall_left']:>3} 张"
-    who_dealer = paint(f"庄 {seats_mod.label(game.dealer)}号", MINE)
+    who_dealer = paint(f"庄 {seats_mod.label(game.dealer)}号·{seats_mod.wind(game.dealer, game.dealer)}", MINE)
     if game.dice is not None:
         who_dealer += paint(f" 骰 {game.dice.a}+{game.dice.b}={game.dice.total}", DIM)
     out.append(wall.ljust(20) + who_dealer)
@@ -130,6 +129,7 @@ def screen(game: Game, me: int, buddy: int, status: str, log: list[str],
     for s in order:
         label = seats_mod.label(s)
         who = (names or {}).get(s) or f"{label}号"
+        who += f"·{seats_mod.wind(s, game.dealer)}"
         fixed = (v.get("melds") or {}).get(s, [])
         hand_n = v["hand_sizes"].get(s, "?")
         head = f" {who}  {hand_n} 张"
@@ -220,13 +220,13 @@ class TuiUi:
     def status(self, core: TableCore, d) -> str:
         p = core.table.at(d.seat) if core.table else None
         if getattr(core.game, "hai", False):
-            return "最后四张：抓了不打，能胡就胡（海底捞月），不能胡就过（/p 暂停 /e 提前结束）"
+            return "最后四张：抓了不打，能胡就胡（海底捞月），不能胡就过（/p 暂停）"
         if d.kind == "ting_declare" and p and p.supports == "human":
-            return "你听牌了，报不报？（/p 暂停 /e 提前结束）"
+            return "你听牌了，报不报？（/p 暂停）"
         if d.kind == "draw" and any(a.kind == "bloom" for a in d.legal) and p and p.supports == "human":
-            return "杠后补张：能后开花就输 2，正常摸牌输 1（/p 暂停 /e 提前结束）"
+            return "杠后补张：能后开花就输 2，正常摸牌输 1（/p 暂停）"
         if p and p.supports == "human":
-            return "轮到你了（/p 暂停 /e 提前结束）"
+            return "轮到你了（/p 暂停）"
         if p and p.supports == "external":
             return f"{p.name} 接入中……"
         if p and p.supports == "llm":
@@ -238,6 +238,7 @@ class TuiUi:
         if core.game is None:
             return
         st = status or (self.status(core, d) if d else "牌桌")
+        st += f" · 第{core.round}局 · LLM上下文 {core.context_round}/{core.rounds}"
         draw_screen(screen(core.game, core.me, core.buddy, st, core.log,
                            pick, self.said_text(), core.names,
                            d.kind if d else None))
@@ -253,10 +254,8 @@ class TuiUi:
                 raise SystemExit("退了。")
             if raw in ("/p", "p", "暂停"):
                 return None, ""
-            if raw in ("/e", "提前结束"):
-                raise EndEarly()
             if not raw.isdigit():
-                print(" 输入编号，或 /p /e")
+                print(" 输入编号，或 /p")
                 continue
             n = int(raw)
             opts = d.legal
@@ -303,7 +302,7 @@ class TuiUi:
             print(f" {core.names.get(core.buddy, '')}：{r.get('reply') or ''}", flush=True)
 
     def round_end(self, core: TableCore, info: dict) -> bool:
-        msg = ("提前结束：这一场到这儿（当前这局没结算）" if info.get("ended_early")
+        msg = ("提前停止：这一场到这儿（当前这局没结算）" if info.get("ended_early")
                else "荒庄：牌墙摸空" if (info.get("result") or {}).get("type") == "draw_game"
                else (info.get("result") or {}).get("settle", {}).get("text")
                or f"这一局打到第 {info.get('steps')} 步")
@@ -317,11 +316,12 @@ class TuiUi:
         last = bool(info.get("last") or info.get("ended_early"))
         if not core.talker:
             return not last
+        notes_end = bool(info.get("context_cut_next"))
         if last:
             print("\n 打完了。想跟牌友聊两句就直接打字，空行回车收场。", flush=True)
         else:
-            print("\n 这一局打完了，下一局还没开。想聊两句就直接打字，空行回车下一局；打 /e 收场。",
-                  flush=True)
+            print("\n 这一局打完了，下一局还没开。想聊两句就直接打字，空行回车下一局；"
+                  "想改长期笔记就先打 /e 提前结束上下文（下一局清空），然后再聊。", flush=True)
         while True:
             try:
                 line = input(" 你：").strip()
@@ -330,9 +330,17 @@ class TuiUi:
                 break
             if not line:
                 break
-            if not last and line in ("/e", "提前结束"):
-                raise EndEarly()
-            r = core.chat(line, phase="after" if last else "between")
+            if line in ("q", "quit", "退出"):
+                raise SystemExit("退了。")
+            if not last and line in ("/e", "提前结束上下文"):
+                r = core.context_cut_request()
+                print(" " + (r.get("message") or "提前结束上下文。"), flush=True)
+                notes_end = True
+                continue
+            r = core.chat(
+                line,
+                phase=("after" if (notes_end or last) else "between"),
+            )
             print(f" {core.names.get(core.buddy, '')}：{r.get('reply') or ''}", flush=True)
         return not last
 
@@ -358,7 +366,8 @@ def main() -> int:
     ap.add_argument("--demo", action="store_true")
     ap.add_argument("--offline", action="store_true")
     ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--rounds", type=int, default=1)
+    ap.add_argument("--rounds", type=int, default=1,
+                    help="LLM 上下文窗口：每几局清空一次（不是牌局总局数）")
     ap.add_argument("--steps", type=int, default=0)
     ap.add_argument("--no-prefetch", action="store_true")
     ap.add_argument("--no-color", action="store_true")

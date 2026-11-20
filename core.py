@@ -25,6 +25,7 @@ from players import (
     BasePlayer,
     EndEarly,
     ExternalPlayer,
+    LLMSeat,
     RandomPlayer,
     SeatPlan,
     Table,
@@ -33,7 +34,7 @@ from players import (
     parse_players,
     plan_from_flags,
 )
-from referee import parse_tile, tile_id
+from referee import melds_from_ids, parse_tile, tile_id, tile_name, ting_hint_lines
 
 ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / "state.json"
@@ -66,7 +67,7 @@ class CoreConfig:
     base: int = 1
     fan_cap: int = 8
     seed: int | None = None
-    rounds: int = 1
+    rounds: int = 1                    # LLM 上下文窗口：每几局清空一次，不是牌局总局数
     steps: int = 0
     demo: bool = False
     offline: bool = False
@@ -83,7 +84,7 @@ class CoreConfig:
 
     def normalized(self) -> "CoreConfig":
         self.seat = max(1, int(self.seat or 1))
-        self.rounds = max(1, int(self.rounds or 1))
+        self.rounds = max(1, min(99, int(self.rounds or 1)))
         self.base = max(0, int(self.base if self.base is not None else 1))
         self.fan_cap = max(0, int(self.fan_cap if self.fan_cap is not None else 8))
         self.steps = max(0, int(self.steps or 0))
@@ -217,9 +218,9 @@ def _result_payload(result: dict | None) -> dict | None:
     return out
 
 
-def make_broadcast(rnd: int, rounds: int, res: dict, board: dict[int, int],
+def make_broadcast(rnd: int, res: dict, board: dict[int, int],
                    you: int | None, ended_early: bool = False) -> str:
-    head = f"【第{rnd}/{rounds}局播报】"
+    head = f"【第{rnd}局播报】"
     if ended_early:
         head += "提前结束，这一局没结算。"
     elif not res:
@@ -292,10 +293,13 @@ class TableCore:
         self.log: list[str] = []
         self.said: dict[int, str] = {}
         self.chat_messages: list[dict] = []
+        self._chat_broadcast_seats: set[int] = set()
         self.board: dict[int, int] = {}
         self.steps = 0
         self.round = 1
         self.rounds = self.cfg.rounds
+        self._context_start_round = 1
+        self._context_cut_next = False
         self.run_id = ""
         self.snap_dir = self.cfg.snap_root / "unstarted"
         self._ended_early = False
@@ -304,6 +308,11 @@ class TableCore:
         self._broadcast = ""
         self._auto_reply = ""
         self._ready = threading.Event()
+
+    @property
+    def context_round(self) -> int:
+        """当前 LLM 上下文窗口走到第几局；窗口起点在换局/提前结束时重设。"""
+        return max(1, min(int(self.rounds), self.round - self._context_start_round + 1))
 
     # ---------- 生命周期 ----------
 
@@ -337,28 +346,16 @@ class TableCore:
                 self._ended_early = True
                 self._finished = True
                 self._broadcast = make_broadcast(
-                    self.round, self.rounds, {}, self.board, self.me, True)
+                    self.round, {}, self.board, self.me, True)
                 info = {
-                    "round": self.round, "rounds": self.rounds, "result": None,
+                    "round": self.round, "rounds": self.rounds,
+                    "context_round": self.context_round, "result": None,
                     "board": {str(s + 1): int(self.board.get(s, 0)) for s in range(4)},
                     "broadcast": self._broadcast, "auto_reply": "",
                     "ended_early": True, "last": True, "steps": self.steps,
                 }
                 self._round_info = info
                 self._safe_persist_locked()
-            if self.talker and not self.cfg.no_chat and not self._stop.is_set():
-                try:
-                    reply = self.talker.chat(self._broadcast, phase="after")
-                    if reply:
-                        with self.lock:
-                            info["auto_reply"] = str(reply)
-                            self._auto_reply = str(reply)
-                            self.chat_messages.append({"role": "buddy", "phase": "after",
-                                                       "text": str(reply)})
-                            self._round_info = info
-                            self._safe_persist_locked()
-                except Exception:
-                    pass
             try:
                 self.ui.round_end(self, info)
             except Exception:
@@ -397,6 +394,8 @@ class TableCore:
                 "error": self._error,
                 "round": self.round,
                 "rounds": self.rounds,
+                "context_round": self.context_round,
+                "context_rounds": self.rounds,
                 "steps": self.steps,
             }
 
@@ -411,9 +410,12 @@ class TableCore:
             game, meta = saved
             self.game = game
             self._load_meta(meta)
-            self.rounds = max(self.rounds, int(meta.get("rounds") or self.rounds))
+            self.rounds = max(1, min(99, int(meta.get("rounds") or self.cfg.rounds or 1)))
             self.steps = int(meta.get("steps") or 0)
             self.round = int(meta.get("round") or 1)
+            self._context_start_round = max(1, int(meta.get("context_start_round") or 1))
+            self._context_start_round = min(self._context_start_round, self.round)
+            self._context_cut_next = bool(meta.get("context_cut_next"))
             self.board = {int(k): int(v) for k, v in (meta.get("board") or {}).items()}
             self.cfg.agent_wait = max(0.0, float(meta.get("agent_wait") or self.cfg.agent_wait or 0))
             self.cfg.steps = max(0, int(meta.get("step_limit") or self.cfg.steps or 0))
@@ -430,11 +432,14 @@ class TableCore:
 
         self.round = 1
         self.rounds = self.cfg.rounds
+        self._context_start_round = 1
+        self._context_cut_next = False
         self.steps = 0
         self.board = {}
         self.log = []
         self.said = {}
         self.chat_messages = []
+        self._chat_broadcast_seats.clear()
         self.plans = self._make_plans()
         self._build_table(meta=None)
         dealer = None if self.cfg.dealer is None else seats_mod.index(self.cfg.dealer, 4)
@@ -447,8 +452,8 @@ class TableCore:
         self.snap_dir = self.cfg.snap_root / self.run_id
         self.board = {s: 0 for s in range(4)}
         self.log.append(f"—— 第 1 局：{seats_mod.label(self.game.dealer)} 号坐庄 ——")
-        if self.llm:
-            self.llm.impl.reset_temp_notes()
+        for p in self.table.of_kind("llm"):
+            p.impl.reset_temp_notes()
         self._safe_persist()
 
     def _make_plans(self) -> list[SeatPlan]:
@@ -474,8 +479,8 @@ class TableCore:
         raw = meta.get("plans")
         if isinstance(raw, list):
             try:
-                return [SeatPlan(int(x["seat"]), str(x["kind"])) for x in raw
-                        if 1 <= int(x.get("seat", 0)) <= 4]
+                return [SeatPlan(int(x["seat"]), str(x["kind"]), dict(x.get("options") or {}))
+                        for x in raw if 1 <= int(x.get("seat", 0)) <= 4]
             except (KeyError, TypeError, ValueError):
                 pass
         return None
@@ -506,8 +511,26 @@ class TableCore:
         rng = random.Random(self.cfg.seed)
 
         def make_llm(plan: SeatPlan):
-            impl = LLMPlayer(StrataClient(), plan.seat, debug_cache=self.cfg.cache)
-            from players import LLMSeat
+            kwargs = {"debug_cache": self.cfg.cache}
+            client = StrataClient()
+            profile_name = str(plan.options.get("profile") or "").strip()
+            if profile_name:
+                from player_profile import by_name
+                profile = by_name(profile_name)
+                if profile is None:
+                    raise ValueError(f"找不到玩家档案：{profile_name}")
+                kwargs.update(
+                    model=profile.model,
+                    concurrency_slot=profile.concurrency_slot,
+                    name=profile.display_name,
+                    persona=profile.persona,
+                    notes_path=profile.notes_path,
+                    soft_notes_path=profile.temp_notes_path,
+                    draft_path=profile.draft_path,
+                    log_path=profile.log_path,
+                )
+                client = StrataClient.from_profile(profile)
+            impl = LLMPlayer(client, plan.seat, **kwargs)
             return LLMSeat(plan.seat, impl)
 
         def make_human(plan: SeatPlan):
@@ -530,25 +553,26 @@ class TableCore:
                 p.cancel_event = self._stop
 
     def _restore_llm(self, meta: dict) -> None:
-        if not (self.llm and meta.get("llm")):
+        """把快照里的 LLM 对话状态按座位装回来。
+
+        新快照存 `llms`（每个 LLM 一座），老快照只有 `llm`（存的是默认牌友）；
+        两种都要能接，不然回退只回牌、不回人。
+        """
+        if not self.table:
             return
-        try:
-            msgs = list(meta["llm"].get("messages") or self.llm.impl.messages)
-            # 回退/接档时如果牌局还没收，旧上下文里的“终场聊天”必须剪掉，
-            # 否则牌友会带着上一支的收场话继续打，还会把“提前结束”记进笔记。
-            if self.game is not None and self.game.result is None \
-                    and self.game.phase != "ended":
-                cut = None
-                for i, msg in enumerate(msgs):
-                    content = str(msg.get("content") or "")
-                    if msg.get("role") == "user" and "【终场聊天】" in content:
-                        cut = i
-                if cut is not None:
-                    msgs = msgs[:cut]
-            self.llm.impl.messages = msgs or self.llm.impl.messages
-            self.llm.impl._pause_calls = int(meta["llm"].get("pause_calls") or 0)
-        except (TypeError, ValueError):
-            pass
+        clip = bool(self.game is not None and self.game.result is None
+                    and self.game.phase != "ended")
+        saved = meta.get("llms")
+        if isinstance(saved, list) and saved:
+            for p in self.table.of_kind("llm"):
+                item = next((x for x in saved
+                             if isinstance(x, dict) and int(x.get("seat") or 0) == p.seat), None)
+                if item:
+                    p.impl.restore_context(item, clip_terminal=clip)
+            return
+        # 兼容老存档：只有一个默认牌友的上下文。
+        if self.llm and isinstance(meta.get("llm"), dict):
+            self.llm.impl.restore_context(meta["llm"], clip_terminal=clip)
 
     def _load_meta(self, meta: dict) -> None:
         self.run_id = str(meta.get("snapshot_run") or "")
@@ -597,7 +621,7 @@ class TableCore:
             prefetched = False
             if d.seat == self.me and self.llm and not self.cfg.no_prefetch:
                 try:
-                    self.llm.impl.prefetch_async(game.observe(self.buddy))
+                    self.llm.impl.prefetch_async(self._llm_view(game.observe(self.buddy)))
                     prefetched = True
                 except Exception:
                     pass
@@ -605,6 +629,14 @@ class TableCore:
             p = self.table.at(d.seat) if self.table else None
             if p is None:
                 raise RuntimeError(f"没有 {d.seat + 1} 号座位")
+            # 同一个并发槽上的 LLM 共用一条模型通道：轮到自己出牌前，
+            # 先把同槽其他 LLM 还在飞的自由思考掐掉，别让出牌排在空想后面。
+            if isinstance(p, LLMSeat) and p.impl.concurrency_slot:
+                for q in self.table.of_kind("llm"):
+                    if q is not p and q.impl.concurrency_slot == p.impl.concurrency_slot:
+                        q.impl.cut_prefetch()
+            if isinstance(p, LLMSeat):
+                d.view = self._llm_view(d.view)
             if isinstance(p, ExternalPlayer):
                 p.on_wait = self._on_external_wait
                 with self.lock:
@@ -715,11 +747,16 @@ class TableCore:
                     self.board[winner] = self.board.get(winner, 0) + sum(
                         int(v) for v in (settle.get("payers") or {}).values())
             self._broadcast = make_broadcast(
-                self.round, self.rounds, res, self.board, self.me, self._ended_early)
-            last = self.round >= self.rounds or self._ended_early or self._stopped_by_limit
+                self.round, res, self.board, self.me, self._ended_early)
+            self._chat_broadcast_seats.clear()
+            # rounds 现在是 LLM 上下文窗口，不再决定整场打几局。只有用户主动
+            # 停止/步数上限才收场；普通一局结束都停下来等“下一局”。
+            last = self._ended_early or self._stopped_by_limit
             info = {
                 "round": self.round,
                 "rounds": self.rounds,
+                "context_round": self.context_round,
+                "context_cut_next": bool(self._context_cut_next),
                 "result": _result_payload(res) if res else None,
                 "board": {str(s + 1): int(self.board.get(s, 0)) for s in range(4)},
                 "broadcast": self._broadcast,
@@ -729,26 +766,11 @@ class TableCore:
                 "steps": self.steps,
             }
             self._round_info = info
-            self._awaiting_next = bool(res and not last)
+            self._awaiting_next = bool(not last)
             self._finished = bool(last)
             self._safe_persist_locked()
 
-        # 牌友的局末播报不拿 core.lock：模型可能想很久，网页轮询不能被卡住。
-        if self.talker and not self.cfg.no_chat and (res or self._ended_early) \
-                and not self._stop.is_set():
-            try:
-                phase = "after" if last or self._ended_early else "between"
-                reply = self.talker.chat(self._broadcast, phase=phase)
-                if reply:
-                    with self.lock:
-                        info["auto_reply"] = str(reply)
-                        self._auto_reply = str(reply)
-                        self.chat_messages.append({"role": "buddy", "phase": phase, "text": str(reply)})
-                        self._round_info = info
-                        self._safe_persist_locked()
-            except Exception:
-                pass
-
+        # 局末不自动找牌友说话；由用户选座位、发第一句时才把播报交给对方。
         if self._ended_early or self._stopped_by_limit:
             try:
                 self.ui.round_end(self, info)
@@ -773,34 +795,71 @@ class TableCore:
                     reply = False
         with self.lock:
             self._awaiting_next = False
-        if not reply or self.round >= self.rounds:
+        if not reply:
             with self.lock:
                 self._finished = True
             return False
 
-        # 下一局
+        # 下一局：局间聊天（包括改长期笔记）已经结束，这里才做上下文窗口判断。
         with self.lock:
-            winner = (self._last_result or {}).get("seat") if self._last_result else None
-            nxt = seats_mod.next_dealer(self.game.dealer, winner, 4)
-            seed = None if self.cfg.seed is None else self.cfg.seed + self.round
-            self.round += 1
-            self.game = Game(GameConfig(
-                seats=4, seed=seed, dealer=nxt,
-                base_points=self.cfg.base, fan_cap=self.cfg.fan_cap,
-            ))
-            self.game.start()
-            self.log.clear()
-            self.log.append(f"—— 第 {self.round} 局：{seats_mod.label(nxt)} 号坐庄 ——")
-            self.said.clear()
-            self._last_result = None
-            self._broadcast = ""
-            self._auto_reply = ""
-            self._round_info = None
-            self._awaiting_next = False
-            if self.llm:
-                self.llm.impl.reset_temp_notes()
-            self._safe_persist_locked()
+            self._start_next_round_locked()
         return True
+
+    def _start_next_round_locked(self) -> None:
+        """在持有 self.lock 时推进到下一局；普通局末和从 finished 强制下一局共用。"""
+        winner = (self._last_result or {}).get("seat") if self._last_result else None
+        nxt = seats_mod.next_dealer(self.game.dealer, winner, 4)
+        seed = None if self.cfg.seed is None else self.cfg.seed + self.round
+        next_round = self.round + 1
+        reset_context = self._context_cut_next or (
+            next_round - self._context_start_round >= self.rounds
+        )
+        self.round = next_round
+        self.steps = 0
+        self.game = Game(GameConfig(
+            seats=4, seed=seed, dealer=nxt,
+            base_points=self.cfg.base, fan_cap=self.cfg.fan_cap,
+        ))
+        self.game.start()
+        self.log.clear()
+        self.log.append(f"—— 第 {self.round} 局：{seats_mod.label(nxt)} 号坐庄 ——")
+        self.said.clear()
+        self._last_result = None
+        self._broadcast = ""
+        self._auto_reply = ""
+        self._round_info = None
+        self._awaiting_next = False
+        self._finished = False
+        self._ended_early = False
+        self._stopped_by_limit = False
+        self._chat_broadcast_seats.clear()
+        if reset_context:
+            self._reset_llm_contexts()
+            self._context_start_round = self.round
+            self._context_cut_next = False
+            self.log.append(f"—— LLM 上下文窗口重开：第 {self.round} 局起 ——")
+        if self.table:
+            for p in self.table.of_kind("llm"):
+                p.impl.reset_temp_notes()
+        self._safe_persist_locked()
+
+    def _reset_llm_contexts(self) -> None:
+        """清空每个 LLM 的对话上下文，只留 system/人设；笔记文件和草稿不动。"""
+        if not self.table:
+            return
+        for p in self.table.of_kind("llm"):
+            try:
+                p.impl.reset_context()
+            except Exception:
+                pass
+
+    def _llm_view(self, view: dict) -> dict:
+        """给 LLM 的局面补上第几局和四家累计分；只改这一份拷贝。"""
+        merged = dict(view)
+        merged["round"] = int(self.round)
+        merged["board"] = {s + 1: int(self.board.get(s, 0)) for s in range(4)}
+        merged["names"] = {s + 1: self.names.get(s, f"{s + 1}号") for s in range(4)}
+        return merged
 
     # ---------- 持久化 / 快照 ----------
 
@@ -816,16 +875,18 @@ class TableCore:
             "snapshot_run": self.run_id,
             "round": self.round,
             "rounds": self.rounds,
+            "context_start_round": self._context_start_round,
+            "context_cut_next": self._context_cut_next,
             "board": {str(k): v for k, v in self.board.items()},
             "chat": self.chat_messages[-30:],
             "broadcast": self._broadcast,
             "agent_wait": self.cfg.agent_wait,
             "step_limit": self.cfg.steps,
-            "plans": [{"seat": p.seat, "kind": p.kind} for p in self.plans],
-            "llm": None if not self.llm else {
-                "messages": self.llm.impl.messages,
-                "pause_calls": self.llm.impl._pause_calls,
-            },
+            "plans": [{"seat": p.seat, "kind": p.kind, "options": p.options} for p in self.plans],
+            "llms": [] if not self.table else [
+                {"seat": p.seat, **p.impl.context_state()}
+                for p in self.table.of_kind("llm")
+            ],
         }
 
     def _safe_persist(self) -> None:
@@ -923,36 +984,142 @@ class TableCore:
         return {"ok": False, "message": "当前 UI 不支持暂停"}
 
     def end_request(self) -> dict:
-        if hasattr(self.ui, "request_end"):
-            self.ui.request_end()
-            return {"ok": True}
-        return {"ok": False, "message": "当前 UI 不支持提前结束"}
+        return self.context_cut_request()
 
-    def chat(self, text: str, phase: str | None = None) -> dict:
+    def _broadcast_for(self, seat_index: int) -> str:
+        """同一个结果，按聊天对象的座位重算“你”的累计分。"""
+        if self._last_result is None and not self._ended_early:
+            return self._broadcast
+        return make_broadcast(
+            self.round, self._last_result or {}, self.board,
+            seat_index, self._ended_early)
+
+    def _chat_target(self, seat: int | str | None):
+        if self.table is None:
+            return None
+        if seat in (None, ""):
+            return self.table.talker()
+        try:
+            no = int(seat)
+        except (TypeError, ValueError):
+            return None
+        for p in self.table.chat_targets():
+            if p.seat == no:
+                return p
+        return None
+
+    def chat(self, text: str, phase: str | None = None,
+             seat: int | str | None = None) -> dict:
         text = str(text or "").strip()
         if not text:
             return {"ok": False, "message": "消息是空的"}
-        if not self.talker or self.cfg.no_chat:
+        if self.cfg.no_chat or self.table is None:
             return {"ok": False, "message": "这桌没有能说话的座位"}
+        target = self._chat_target(seat)
+        if target is None:
+            return {"ok": False, "message": "没有这个聊天对象"}
+        # 上下文已标结束但前端状态还没刷新时，按轮次结束权限聊，别又落回局间追加。
+        if phase in (None, "between") and self._awaiting_next and self._context_cut_next:
+            phase = "after"
         phase = phase or "pause"
+        send_text = text
+        ident = ""
+        if target is not self.talker:
+            ident = (f"【你是谁】你是{self.names.get(target.seat - 1, f'{target.seat}号')}"
+                     f"（{target.seat}号）。桌上的播报和别人的话都不是你的亲历。\n")
         with self.lock:
-            self.chat_messages.append({"role": "user", "phase": phase, "text": text})
+            # 播报不自动发；用户第一次点开某个座位时，才把本局播报夹在首句里。
+            if phase in ("between", "after") and self._broadcast \
+                    and target.seat not in self._chat_broadcast_seats:
+                send_text = (ident
+                             + f"【本局播报】\n{self._broadcast_for(target.seat - 1)}"
+                             + f"\n\n【他说】\n{text}")
+                self._chat_broadcast_seats.add(target.seat)
+            else:
+                send_text = ident + text
+            self.chat_messages.append({
+                "role": "user", "phase": phase, "text": text,
+                "seat": target.seat, "name": "你",
+            })
             self._safe_persist_locked()
         try:
-            reply = self.talker.chat(text, phase=phase)
+            reply = target.chat(send_text, phase=phase)
         except Exception as exc:                       # noqa: BLE001
             return {"ok": False, "message": str(exc)}
         with self.lock:
             if reply:
-                self.chat_messages.append({"role": "buddy", "phase": phase, "text": str(reply)})
+                self.chat_messages.append({
+                    "role": "buddy", "phase": phase, "text": str(reply),
+                    "seat": target.seat,
+                    "name": self.names.get(target.seat - 1, f"{target.seat}号"),
+                })
             self._safe_persist_locked()
-        return {"ok": True, "reply": reply or ""}
+        return {"ok": True, "reply": reply or "", "seat": target.seat,
+                "name": self.names.get(target.seat - 1, f"{target.seat}号")}
 
     def next_round_request(self) -> dict:
-        if hasattr(self.ui, "allow_next"):
+        if self._awaiting_next and hasattr(self.ui, "allow_next"):
             self.ui.allow_next()
             return {"ok": True}
-        return {"ok": False, "message": "当前 UI 不接下一局"}
+        # 从旧存档/提前结束留下的 finished 桌继续：不再要求“重新开一桌”。
+        with self.lock:
+            game = self.game
+            if game is None:
+                return {"ok": False, "message": "牌桌还没起来"}
+            if game.result is None and game.phase != "ended":
+                return {"ok": False, "message": "本局还没结束，不能下一局"}
+            if self._thread and self._thread.is_alive():
+                return {"ok": False, "message": "牌桌还在跑，稍等"}
+            if self._last_result is None:
+                self._last_result = game.result or {}
+            self._start_next_round_locked()
+            self._stop.clear()
+            self._running = True
+            self._ready.set()
+        t = threading.Thread(target=self._run_guard, name="mahjong-core", daemon=True)
+        with self.lock:
+            self._thread = t
+        t.start()
+        return {"ok": True, "message": "下一局开始", "round": self.round}
+
+    def context_cut_request(self) -> dict:
+        """提前结束当前 LLM 上下文窗口；只在局间能用。
+
+        点了先停在“轮次结束”聊天里，LLM 这时可以按窗口结束权限改长期笔记；
+        真正进入下一局时才清空 messages。
+        """
+        with self.lock:
+            if not self._awaiting_next:
+                return {"ok": False, "message": "只能在局间（本局结束、下一局开始前）用"}
+            already = self._context_cut_next
+            self._context_cut_next = True
+            if self.table:
+                for p in self.table.of_kind("llm"):
+                    try:
+                        p.impl.set_phase("after")
+                    except Exception:
+                        pass
+            self._safe_persist_locked()
+        if hasattr(self.ui, "request_context_cut"):
+            self.ui.request_context_cut()
+        return {
+            "ok": True,
+            "already": already,
+            "message": ("当前上下文已标记结束；下一局开始才清空"
+                        if already else
+                        "当前上下文已结束；现在可以聊或改长期笔记，下一局开始才清空"),
+        }
+
+    def set_context_rounds(self, rounds: int) -> dict:
+        """单独改 LLM 上下文窗口长度；不用新开一桌。"""
+        with self.lock:
+            n = max(1, min(99, int(rounds)))
+            self.rounds = n
+            self.cfg.rounds = n
+            if self.round - self._context_start_round + 1 > n:
+                self._context_start_round = max(1, self.round - n + 1)
+            self._safe_persist_locked()
+            return {"ok": True, "rounds": n, "context_round": self.context_round}
 
     def resume_after_pause(self) -> dict:
         if hasattr(self.ui, "resume_play"):
@@ -1011,6 +1178,7 @@ class TableCore:
                     "hand": other_hand if debug or no == own else None,
                     "melds": seat_melds,
                     "discards": list(_at(discards, idx, []) or []),
+                    "wind": seats_mod.wind(idx, int(dealer or 0), int(view.get("seats") or 4)),
                     "ting": bool(_at(ting, idx, False)),
                     "piao": bool(_at(piao, idx, False)),
                     "ting_closed": bool(_at(ting_closed, idx, False)),
@@ -1026,6 +1194,25 @@ class TableCore:
                 rec["index"] = i
                 rec["label"] = action_label(rec)
                 actions.append(rec)
+
+            ting_hints = []
+            if (d is not None and d.seat == own_idx and d.kind == "discard"
+                    and not (view.get("ting") or {}).get(own_idx)):
+                try:
+                    fixed = melds_from_ids(view.get("fixed") or [])
+                    discards = [a.tile for a in d.legal
+                                if a.kind == "discard" and a.tile is not None]
+                    raw = self.game.r.discard_ting_hints(view.get("hand") or [], fixed, discards)
+                    lines = ting_hint_lines(raw)
+                    ting_hints = [{
+                        "tile": tile_id(h["tile"]),
+                        "tile_name": tile_name(h["tile"]),
+                        "waits": [tile_id(w) for w in h["waits"]],
+                        "wait_names": [tile_name(w) for w in h["waits"]],
+                        "text": line,
+                    } for h, line in zip(raw, lines)]
+                except Exception:
+                    ting_hints = []
 
             said = []
             for k, v in sorted(self.said.items()):
@@ -1045,6 +1232,14 @@ class TableCore:
                 peek = self.game.pending_peek()
                 pending = {"seat": seats_mod.label(peek.seat), "kind": peek.kind}
                 turn = peek.seat
+
+            targets = self.table.chat_targets() if self.table else []
+            target_rows = [{
+                "seat": p.seat,
+                "name": self.names.get(p.seat - 1, p.name),
+                "kind": p.kind,
+            } for p in targets]
+            talker_name = target_rows[0]["name"] if target_rows else ""
 
             return {
                 "ok": True,
@@ -1068,10 +1263,14 @@ class TableCore:
                                                    "tile": last.get("tile")},
                 "pending": pending,
                 "actions": actions,
+                "ting_hints": ting_hints,
                 "result": result,
                 "steps": int(self.steps),
                 "round": int(self.round),
                 "rounds": int(self.rounds),
+                "context_round": int(self.context_round),
+                "context_rounds": int(self.rounds),
+                "context_cut_next": bool(self._context_cut_next),
                 "board": {str(s + 1): int(self.board.get(s, 0)) for s in range(4)},
                 "paused": bool(self._paused),
                 "awaiting_next": bool(self._awaiting_next),
@@ -1079,8 +1278,9 @@ class TableCore:
                 "broadcast": self._broadcast,
                 "chat": list(self.chat_messages[-30:]),
                 "chat_busy": False,
-                "can_chat": bool(self.talker and not self.cfg.no_chat),
-                "talker": self.names.get(self.buddy, "") if self.buddy is not None else "",
+                "chat_targets": target_rows,
+                "can_chat": bool(target_rows) and not self.cfg.no_chat,
+                "talker": talker_name,
                 "said": said[-4:],
                 "log": list(self.log[-12:]),
                 "waiting": {

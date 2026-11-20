@@ -104,7 +104,7 @@ TOOLS: list[dict] = [
 class GameConfig:
     seats: int = 4
     start_hand: int = 13
-    dealer: int | None = None        # 引擎下标；None = 开盘掷骰定庄
+    dealer: int | None = None        # 引擎下标；None = 1 号东家坐第一庄
     seed: int | None = None
     base_points: int = 1             # 结算底分
     fan_cap: int = 8                 # 封顶几番
@@ -203,9 +203,8 @@ class Game:
         for s in range(self.cfg.seats):
             for _ in range(self.cfg.start_hand):
                 self.hands[s][self.wall.popleft()] += 1
-        if self.cfg.dealer is None:                 # 没指定庄家：两颗骰子说了算
-            self.dice = seats_mod.roll(rng, self.cfg.seats)
-            self.dealer = seats_mod.dealer_index(self.dice)
+        if self.cfg.dealer is None:                 # 没指定庄家：1 号东家坐第一庄
+            self.dealer = 0
         else:
             self.dealer = self.cfg.dealer
         self.turn = self.dealer

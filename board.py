@@ -166,7 +166,7 @@ def render(state: dict, *, me_no: int | None, refresh: float = 0.0) -> str:
         if dead.get(str(s)):
             badges.append('<span class="badge">已弃胡</span>')
         tag = names.get(no)
-        who = f"{no} 号" + (f"（{TAG_NAME.get(tag, tag)}）" if tag else "")
+        who = f"{no} 号（{seats_mod.wind(s, dealer or 0)}）" + (f"（{TAG_NAME.get(tag, tag)}）" if tag else "")
         parts.append(f'<div class="seat"><div class="who">{who}{"".join(badges)}</div>')
         parts.append(f'<div class="hand">{hand_html(counts, s, hands_format)}</div>')
         parts.append(f'<div class="river"><span class="lbl">面子</span>{melds_html(fixed.get(str(s)) or [])}</div>')

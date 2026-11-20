@@ -2,6 +2,33 @@
 
 下回要开一局、或者要让我坐到牌桌上，照这份做，别重新猜。
 
+## 〇、监听 external 座位的正确办法（先看这条）
+
+**监听 = 我一直等在 `pending.json` 上，看到就答；不是挂个 `watch.py` 就算监听。**
+
+- `seat_io.py wait`：只读文件、阻塞等下一手；这是监听。
+- `seat_io.py answer`：按 `legal` 写回动作；这是落子。
+- `watch.py --brain fast` / `--brain model`：会自己写 `answer.json`，是脚本/模型在打，不是“我监听”。
+- `watch.py --brain mine --cap 0`：只是门铃，会喊“你上”，但**不会替你写 answer**；没人接就死等。它不能当监听，也不能兜底。
+
+正确循环（座位号按当前桌换，下面以 1 号为例）：
+
+```powershell
+# 1. 阻塞等 1 号 pending；超时 0 = 一直等
+& 'D:\Program Files\Python313\python.exe' seat_io.py wait --seat 1 --timeout 0 --json
+
+# 2. 从返回 JSON 的 legal 里选一个，优先 --pick N（保留 meta）
+& 'D:\Program Files\Python313\python.exe' seat_io.py answer --seat 1 --pick 3 --say "…"
+```
+
+要点：
+
+- 每答完一手，**马上再 `wait`**；答完就停，就是没监听。
+- `wait` 返回 `timeout`，说明还没轮到这张座位（牌桌在等别人），继续等，不要乱答。
+- 加杠、明杠、后开花一定用 `--pick N`；自己拼 `--kind` 会丢 `meta`。
+- 只看 `pending.view`，不要读 `state.json` 里的 `hands`；那会看到别家手牌。
+- 要挂后台进程，只能挂“只读提醒”，真正落子仍由我按 pending 手动作答；不要让 `watch.py --brain mine` 的“保底”替打。
+
 ## 一、四个人是谁
 
 `play.py`（TUI）和 `webui.py`（网页）都只是 `core.py` 的 UI 适配层；座位还是这几种：
@@ -69,32 +96,27 @@ python seat_io.py hear/tell --seat 3 ...       # 递话窗口
 
 **加杠、明杠、手里四张杠**：一定要用 `--pick N`，`--kind kan --tile p7` 会丢 `meta`，引擎判非法（老坑）。
 
-## 四、自动答：watch.py（挂上就不用喊我）
+## 四、`watch.py`：自动脑或门铃，不是默认监听
 
-`watch.py` 每 0.1 秒看 `pending.json`，出现新 `round` 立刻自己出一手、写 `answer.json`：
+`watch.py` 每 0.1 秒看 `pending.json`。它有三种用法，先分清谁在落子：
 
 ```bash
-python watch.py --seat 3                 # 默认模型脑（本地 strata），一手十几到几十秒
-python watch.py --seat 3 --brain fast    # 纯脚本快脑，一手毫秒级
-python watch.py --seat 3 --brain mine --hold 30   # 等我亲自落子，等不到快脑保底
-python watch.py --seat 3 --dry           # 只打印打算怎么打，不落子
+python watch.py --seat 1                 # 默认模型脑（本地 strata），它自己打
+python watch.py --seat 1 --brain fast    # 纯脚本快脑，它自己打
+python watch.py --seat 1 --brain mine --hold 12 --cap 0   # 只喊“你上”，绝不由脚本落子
+python watch.py --seat 1 --dry           # 只打印打算怎么打，不落子
 ```
 
-**`--brain mine` 是现在的实战口径**（显卡不够同时跑两个选手时用）：来了 pending 先算好一手保底动作并记日志，然后等最多 `--hold` 秒——这期间我（对话里的人）用 `seat_io.py answer` 落子，牌桌收下后 `pending.json` 就消失，watcher 看到就记一行「你接了」并且**不重复落子**；超时没等到就自己把保底那手写上，`say` 标「（保底）」，桌子不会停在那一手。
+**`--brain mine --cap 0` 不是监听，只是门铃。** 它来了 pending 先算一个内存里的保底动作，然后记一行“你上”并一直等；它**不会写 `answer.json`**。我不接，牌桌就卡在这一手，直到有人用 `seat_io.py answer` 落子。真正监听见第〇节。
 
-日志长这样：
+`--brain fast` / `--brain model` 会自己落子，适合测试或故意让脚本打；要“我亲自打”就别开。
 
-```
-06:19:27 第 5 手 discard 等你 ≤30s，保底 ting
-06:19:54 第 5 手 你接了
-```
-
-或
+`--brain mine --cap 0` 的日志长这样：
 
 ```
-06:19:27 第 5 手 discard 等你 ≤30s，保底 ting
-06:19:30 第 5 手 没等到你，保底顶上
-06:19:30 第 5 手 discard -> ting [3.0s] （保底）
+22:46:01 第 3 手 react 你上，预算 12s
+22:46:13 第 3 手 超预算，不替你打，我继续等
+22:48:04 第 3 手 你接了（慢了一步，没替你打）
 ```
 
 后台挂（不占窗口，日志进 `watch.log`）：
@@ -132,9 +154,9 @@ Start-Process powershell -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Ex
 1. `pending.json` 的 `legal` → `Action`（`as_action()`，支持 `draw/bloom/ting` 这些新阶段，`meta` 原样带回）。
 2. **快脑**（纯脚本，不调模型）：能胡就胡（`win`）→ 能后就开（`bloom`）→ 听牌就报（`ting`）→ 出牌时把每个候选都拿裁判 `Referee.waits()` 算一遍，优先「打完立刻单听」的那张，其次是听多张的，都听不了就打邻近最少的孤张。
 3. **模型脑**（`--brain model`）：交给 `LLMPlayer.decide`，`strata-lowthink`，日志 `seat3_log.jsonl`。实测一手 16–61 秒，牌桌会明显停住，只适合复盘看它怎么想。
-4. **我脑**（`--brain mine`）：快脑先当保底，`settle()` 盯着 `pending.json` 等我落子，`--hold` 秒内没等到就保底顶上。
-4. **护栏**：出来的动作必须在 `legal` 里（`allowed()` 比 kind + tile/combo/meta），不在就用 `fallback()`（优先 `pass`、`draw`，否则第一个合法动作）——不让一手胡来的动作把牌桌判崩。
-5. 写 `answer.json`，同时在 `watch.log` 记一行：手数、阶段、动作、耗时、说的话。
+4. **我脑**（`--brain mine --cap 0`）：只在日志里喊“你上”，`settle()` 盯着 `pending.json` 等我用 `seat_io.py answer` 落子；它不会写 `answer.json`，也不会保底。
+5. **护栏**：出来的动作必须在 `legal` 里（`allowed()` 比 kind + tile/combo/meta），不在就用 `fallback()`（优先 `pass`、`draw`，否则第一个合法动作）——不让一手胡来的动作把牌桌判崩。
+6. 自动脑（`fast` / `model`）写 `answer.json`，同时在 `watch.log` 记一行：手数、阶段、动作、耗时、说的话。
 
 脚本自测过：12 局全随机牌桌，3 号用快脑，0 次崩、0 次非法动作，整局耗时 3–4 秒。
 
@@ -142,8 +164,8 @@ Start-Process powershell -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Ex
 
 1. 确认 Strata 服务在（只有模型脑才用得上：`http://127.0.0.1:11436/v1/chat/completions`）。
 2. 开牌桌：`python play.py --seat 1 --buddy 2 --agent 3 --trace`（或 `--resume`）。
-3. 挂自动手：`python watch.py --seat 3`。
-4. 自己坐 1 号打；轮到我（3 号）时不用吭声，`watch.log` 会自己涨。
+3. 挂监听：`python seat_io.py wait --seat 3 --timeout 0 --json`，出现 pending 就按第〇节循环答。
+4. 自己坐 1 号打；轮到我（3 号）时我看 `pending.json` 自己落子，不让 `watch.py --brain fast/model` 替打。
 5. 打完看 `python seat_io.py trace -n 40` 复盘。
 
 ## 六、牌桌上的规矩（改代码前先看 `规则.txt`，那是唯一权威）
@@ -164,7 +186,7 @@ Start-Process powershell -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Ex
 | `llm_player.py` | 牌友的脑子（提示词、工具解析、预算） |
 | `players.py` | 四种座位玩家，`ExternalPlayer` 的收发就在这儿 |
 | `seat_io.py` | 接入位的命令行进出接口 |
-| `watch.py` | 3 号的自动手（挂上就不用叫） |
+| `watch.py` | 自动脑/门铃；`fast`/`model` 自动打，`mine --cap 0` 只提醒不落子 |
 | `state.py` / `state.json` | 存档、`--resume` |
 | `webui.py` / `webui.html` / `webui.js` | 网页 UI 适配层，进程内启动 `core.TableCore` |
 | `trace.jsonl` | 每步一行，复盘用 |
@@ -184,10 +206,10 @@ python seat_io.py answer --seat 3 --kind discard --tile s8 --say "…"; python s
 
 - 落子用 `--kind` 或 `--pick N`（加杠、明杠这种带 `meta` 的必须 `--pick`，`--kind` 会丢 `meta` 直接崩）。
 - `wait` 超时返回 `timeout`，说明牌桌正等别人（比如 1 号你），继续等就是，别乱答。
-- 我落子之后 `pending.json` 会被 `ExternalPlayer` 删掉，`watch.py` 看到就记一行「你接了」，不会重复落子。
-- 我慢了、`watch.py` 先写了保底，我那条旧 `round` 的 `answer` 会被丢掉（`round` 对不上，且下一手开头会清文件），不会污染牌桌。
-- 我只能在"对话回合开着"的时候听：我不像后台进程，没人给我发消息就不会自己醒。所以要么开局跟我说一句「开」，我就在这个回合里一直轮询到局终；要么靠 `watch.py --brain mine --hold 30` 兜底（我不接就是它接）。
-- 交叉验证：`python seat_io.py trace -n 20` 看每手是谁、多久；`watch.log` 看「你接了 / 保底顶上」。
+- 我落子之后 `pending.json` 会被 `ExternalPlayer` 删掉；如果另开了 `watch.py --brain mine`，它看到就记一行「你接了」，不会重复落子。
+- 我慢了，不会有脚本兜底；`watch.py --brain mine` 只是门铃，`--cap 0` 时它会一直等，牌桌也就停在这一手。要避免卡住，就答完一手立刻再 `wait`。
+- 我只能在“对话回合开着”的时候听：我不像后台进程，没人给我发消息就不会自己醒。所以要么开局跟我说一句「开」，我就在这个回合里一直 `seat_io.py wait/answer` 到局终；要么另开一个只读提醒，但看到 pending 仍必须由我落子。**不要靠 `watch.py --brain fast/model` 替我打。**
+- 交叉验证：`python seat_io.py trace -n 20` 看每手是谁、多久；`watch.log` 看「你上 / 你接了」。
 - **别闷头打牌**：看见规则的窟窿、引擎的怪招、TUI 的显示问题，牌桌上用 `--say "⚠️ …"` 直接说一句（1 号看得见），同时 `python seat_io.py log "…"` 记进 `问题.md`；`python seat_io.py log -l` 看清单，局终一次性交代。
 - **只看 `pending.json` 给的 `view`，别去翻 `state.json` 的 `hands`。** 那里面是四家的计数数组，看一眼就知道别人手里剩什么、在等哪张——我上一局就这么把 1 号的单吊 6 饼算出来还念到桌上了。`view` 里只有该我看见的：自己的手牌、四家的面子、牌河、牌墙剩几张、最后一张明牌。别人报没报听（`ting` 旗标）是牌桌公开信息，可以提；`hands` 不是。
 
@@ -195,7 +217,7 @@ python seat_io.py answer --seat 3 --kind discard --tile s8 --say "…"; python s
 
 - `--kind` 不带 `meta` 会让加杠崩，用 `--pick`。
 - `answer.json` 的 `round` 抄错，等于没答，牌桌会死在原地等。
-- **别拿模型脑当默认**：一手 16–61 秒，牌桌上看起来就是「没监听」。快脑才是默认。
+- **别把 `watch.py --brain fast/model` 当默认监听**：它会自己落子；`--brain mine --cap 0` 只是门铃，不写 answer。真正监听是第〇节的 `seat_io.py wait/answer` 循环。
 - 存档恢复后外部座位的 `round` 从 1 重计、`events/history` 没存，复盘时别拿 TUI 上的回合号对 `trace.jsonl`。
 - 两个进程同时写 `牌友笔记.md`（牌友 + 3 号）会互相覆盖，别指望它俩共享记忆。
 - 空想没结论时**别往历史里塞占位话**：「（闲下来想这手牌，还没想完）」这类句子会被模型当成自己上一句台词，下一手照着念，牌桌上整排复读。

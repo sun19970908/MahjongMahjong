@@ -5,9 +5,12 @@ __pycache__/
 *.err
 *.jsonl
 state.json
-state.before-rollback.json
+state.before-*.json
+*.pid
+profiles/
+webui.*.before-*
 snapshots/
-临时笔记.md
+临时笔记*.md
 长期笔记草稿.md
 *.草稿.md
 seats/

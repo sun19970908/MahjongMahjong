@@ -3,7 +3,8 @@
 跟 play.py 完全分开：不带牌桌、不带手牌、不带打牌工具，独一份对话历史。
 它想改笔记就自己改牌友笔记.md，改完接着跟你说话；这里不限制篇幅、不限制改几次。
 
-用法：python chat.py        （空行回车退出）
+用法：python chat.py --player 方小满
+    （输入 /send 发送，/quit 退出；支持多行，空行原样保留）
 """
 
 from __future__ import annotations
@@ -13,18 +14,19 @@ import json
 from pathlib import Path
 
 from game import _tool
-from llm_player import StrataClient, _room_for
+from llm_player import StrataClient
+from player_profile import all_profiles, by_name
 
 HERE = Path(__file__).resolve().parent
 RULES_PATH = HERE / "规则.txt"
 NOTES_PATH = HERE / "牌友笔记.md"
 
-PERSONA = ("你是「豆包工作」，一桌麻将里的牌友。说话像牌友，记账像会计。"
+PERSONA = ("你是一桌麻将里的牌友。"
            "现在不在牌桌上，是单独聊天：没有牌局、没有手牌，只有规则和你的笔记。")
 
 NOTE_TOOL = _tool(
     "edit_note",
-    "改你的笔记（牌友笔记.md）。mode=append 往末尾加一条，写 new_string；"
+    "改你的长期笔记（profile 里的 长期笔记.md）。mode=append 往末尾加一条，写 new_string；"
     "mode=replace 把 old_string 那一小段原文换成 new_string，old_string 必须唯一；"
     "mode=replace_all 把 old_string 的所有出现都换掉；"
     "mode=replace_tail 从 old_string 第一次出现处一直改到文件末尾；"
@@ -44,10 +46,37 @@ def _read(path: Path) -> str:
         return ""
 
 
-def system_prompt() -> str:
+def system_prompt(profile=None) -> str:
     rules = _read(RULES_PATH) or "（规则文件没找到）"
-    notes = _read(NOTES_PATH) or "（还没记过什么）"
-    return f"{PERSONA}\n\n【规则】\n{rules}\n\n【你的笔记】\n{notes}"
+    if profile:
+        name = profile.display_name
+        notes = _read(profile.notes_path) or "（还没记过什么）"
+        persona = profile.persona or PERSONA
+        head = f"你是「{name}」。\n{persona}"
+    else:
+        notes = _read(NOTES_PATH) or "（还没记过什么）"
+        head = PERSONA
+    return f"{head}\n\n【规则】\n{rules}\n\n【你的笔记】\n{notes}"
+
+
+def _read_message() -> str | None:
+    """读一条消息：可多行，/send 发送，/quit 退出；空行原样保留。"""
+    lines: list[str] = []
+    first = True
+    while True:
+        prompt = " 你：" if first else "    "
+        first = False
+        try:
+            raw = input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        cmd = raw.strip().lower()
+        if cmd == "/quit":
+            return None
+        if cmd == "/send":
+            return "\n".join(lines)
+        lines.append(raw)
 
 
 def apply_note(path: Path, args: dict) -> str:
@@ -96,27 +125,36 @@ def apply_note(path: Path, args: dict) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="strata-lowthink")
+    ap.add_argument("--player", required=True,
+                    help="玩家名；用 profiles/<玩家名>/profile.json")
+    ap.add_argument("--model", default=None, help="默认用档案里的 model")
     ap.add_argument("--budget", type=int, default=6000, help="思考预算 token；改笔记按这个预算放开")
     args = ap.parse_args()
 
-    client = StrataClient()
-    messages: list[dict] = [{"role": "system", "content": system_prompt()}]
-    print(" 牌友单聊：只带规则、人设、你的笔记；它能改 牌友笔记.md。空行回车退出。")
+    profile = by_name(args.player)
+    if profile is None:
+        names = ", ".join(p.name for p in all_profiles())
+        print(f"找不到玩家档案：{args.player}（现有：{names}）")
+        return 2
+    notes_path = profile.notes_path
+    model = args.model or profile.model
+    client = StrataClient.from_profile(profile)
+    messages: list[dict] = [{"role": "system", "content": system_prompt(profile)}]
+    print(f" 牌友单聊：{profile.display_name}；只带规则、人设、自己的笔记；它能改自己的长期笔记。"
+          "输入 /send 发送，/quit 退出；换行和空行都会保留。")
 
     while True:
-        try:
-            line = input(" 你：").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
+        message = _read_message()
+        if message is None:
             break
-        if not line:
-            break
-        messages.append({"role": "user", "content": line})
+        if not message.strip():
+            print("（没写内容，没发）")
+            continue
+        messages.append({"role": "user", "content": message})
 
         while True:                            # 想改几次就改几次，不设轮数上限
-            r = client.chat(messages, model=args.model, tools=TOOLS,
-                            tool_choice="auto", max_tokens=_room_for(args.budget),
+            r = client.chat(messages, model=model, tools=TOOLS,
+                            tool_choice="auto",
                             reasoning_budget=args.budget)
             if r.tool_call and r.tool_call.get("name") == "edit_note":
                 call_id = f"note_{len(messages)}"
@@ -127,7 +165,7 @@ def main() -> int:
                         "name": "edit_note",
                         "arguments": json.dumps(r.tool_call.get("arguments") or {},
                                                ensure_ascii=False)}}]})
-                done = apply_note(NOTES_PATH, r.tool_call.get("arguments") or {})
+                done = apply_note(notes_path, r.tool_call.get("arguments") or {})
                 messages.append({"role": "tool", "tool_call_id": call_id, "content": done})
                 if r.speech:
                     print(f" 牌友：{r.speech}")

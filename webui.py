@@ -132,10 +132,9 @@ class WebUi:
             self._resume_requested = False
         self.answers.put(("pause", None, ""))
 
-    def request_end(self) -> None:
-        with self._lock:
-            self._end_requested = True
-        self.answers.put(("end", None, ""))
+    def request_context_cut(self) -> None:
+        """局间标记上下文结束：不推进下一局，留给用户聊完再点“下一局”。"""
+        return
 
     def allow_next(self) -> None:
         self._next_event.set()
@@ -149,9 +148,10 @@ class WebUi:
 class WebTable:
     """一个网页进程只有一桌；起停和换桌都在这里，不碰牌局规则。"""
 
-    def __init__(self, players: str = DEFAULT_PLAYERS) -> None:
+    def __init__(self, players: str = DEFAULT_PLAYERS, context_rounds: int = 1) -> None:
         self.lock = threading.RLock()
         self.players = players
+        self.context_rounds = max(1, int(context_rounds or 1))
         self.ui: WebUi | None = None
         self.core: TableCore | None = None
         self.error = ""
@@ -167,7 +167,7 @@ class WebTable:
             base=int(overrides.get("base") or 1),
             fan_cap=int(overrides.get("fan_cap") or 8),
             seed=(int(overrides["seed"]) if overrides.get("seed") not in (None, "") else None),
-            rounds=max(1, int(overrides.get("rounds") or 1)),
+            rounds=self.context_rounds,
             steps=max(0, int(overrides.get("steps") or 0)),
             agent_wait=max(0.0, float(overrides.get("agent_wait") or 0)),
             offline=bool(overrides.get("offline")),
@@ -201,6 +201,7 @@ class WebTable:
             self.core = core
             try:
                 core.start(resume=resume, background=True)
+                self.context_rounds = core.rounds
             except Exception as exc:                     # noqa: BLE001
                 self.error = str(exc)
             return self.status()
@@ -229,7 +230,9 @@ class WebTable:
                 return {"ok": False, "running": False, "error": self.error,
                         "message": "牌桌还没起来"}
             try:
-                return c.state_payload(debug=debug, seat=1)
+                # 网页坐的那一家人可能在随机后的任何座位；按内核记的 human 座位取视角，
+                # 不能再写死 1 号，否则自己的手牌会被当成上家亮出来。
+                return c.state_payload(debug=debug)
             except Exception as exc:                     # noqa: BLE001
                 return {"ok": False, "running": False, "error": str(exc),
                         "message": str(exc)}
@@ -240,12 +243,13 @@ class WebTable:
                 return {"ok": False, "message": "牌桌没起来"}
             return self.core.submit(index, say)
 
-    def chat(self, text: str, phase: str | None = None) -> dict:
+    def chat(self, text: str, phase: str | None = None,
+             seat: int | str | None = None) -> dict:
         with self.lock:
             c = self.core
         if c is None:
             return {"ok": False, "message": "牌桌没起来"}
-        return c.chat(text, phase=phase)
+        return c.chat(text, phase=phase, seat=seat)
 
     def pause(self) -> dict:
         with self.lock:
@@ -254,6 +258,15 @@ class WebTable:
     def end(self) -> dict:
         with self.lock:
             return self.core.end_request() if self.core else {"ok": False}
+
+    def set_context_rounds(self, rounds: int) -> dict:
+        with self.lock:
+            if self.core is None:
+                return {"ok": False, "message": "牌桌没起来"}
+            result = self.core.set_context_rounds(rounds)
+            if result.get("ok"):
+                self.context_rounds = int(result["rounds"])
+            return result
 
     def resume_play(self) -> dict:
         with self.lock:
@@ -381,7 +394,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/chat":
             self._json(self.table.chat(str(body.get("text") or ""),
-                                       body.get("phase") or None))
+                                       body.get("phase") or None,
+                                       body.get("seat")))
             return
         if path == "/api/pause":
             self._json(self.table.pause())
@@ -394,6 +408,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/end":
             self._json(self.table.end())
+            return
+        if path == "/api/context-rounds":
+            try:
+                rounds = int(body.get("rounds"))
+            except (TypeError, ValueError):
+                self._json({"ok": False, "message": "缺少上下文局数"}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json(self.table.set_context_rounds(rounds))
             return
         if path == "/api/quit":
             self._json({"ok": True, **self.table.stop()})
@@ -412,11 +434,13 @@ def main() -> int:
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--debug", action="store_true",
                     help="调试全牌：网页可见四家手牌（本地教学用）")
+    ap.add_argument("--context-rounds", type=int, default=1,
+                    help="LLM 上下文窗口：每几局清空一次（不是牌局总局数）")
     ap.add_argument("--no-start", action="store_true")
     ap.add_argument("--no-open", action="store_true")
     args = ap.parse_args()
 
-    table = WebTable(args.players)
+    table = WebTable(args.players, args.context_rounds)
     if not args.no_start:
         resume = not args.new
         if not args.resume and not args.new:

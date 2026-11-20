@@ -1,13 +1,13 @@
 """座位、庄家、色子 —— 全桌只有这一处定义"几号是谁"。
 
-为什么要单独一层：以前 0 号是你、1 号是牌友、2 号是接入位，全写死在命令行、
+为什么单独一层：以前 0 号是你、1 号是牌友、2 号是接入位，全写死在命令行、
 TUI、文件信箱里，换一张桌子就得改代码。现在：
 
     * 牌局引擎（game/referee/state）内部仍按 0..n-1 记账，快、不用改；
     * 人看得见的地方（命令行、TUI、trace、seats/seatN、state 的 meta）一律从 **1 号** 起；
     * 换算只走本模块的 `label()` / `index()`，别在别处 ±1。
 
-庄家与色子也归这里：开局掷两颗骰子定庄，胡了连庄、没胡下家坐庄。
+默认 1 号是东家，东家先坐庄；胡了连庄、没胡下家坐庄。
 """
 
 from __future__ import annotations
@@ -18,6 +18,17 @@ from dataclasses import dataclass
 FIRST_SEAT = 1          # 人看见的第一个座位号
 DICE_SIDES = 6          # 两颗六面骰
 DICE_COUNT = 2
+WINDS = ("东", "南", "西", "北")   # 按 1 号起排；庄家是东，之后南/西/北顺着转
+
+
+def wind(seat: int, dealer: int = 0, seats: int = 4) -> str:
+    """引擎下标 → 这家的风位；庄家永远是东，下家南，依次转。"""
+    return WINDS[(seat - dealer) % len(WINDS)]
+
+
+def wind_label(seat: int, dealer: int = FIRST_SEAT) -> str:
+    """座位号（1 起）→ 风位；默认 1 号东、2 号南、3 号西、4 号北。"""
+    return WINDS[(seat - dealer) % len(WINDS)]
 
 
 def label(index: int) -> int:

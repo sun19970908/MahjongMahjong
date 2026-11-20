@@ -11,10 +11,10 @@
     两遍加起来 20-30s，塞得进 60 秒预算。
 
 prompt 布局（按你定的）：
-    [system] 人设 + 规则 + 截断提醒  ← 静态，可被 prompt cache 命中
+    [system] 人设 + 规则 + 截断提醒  ← 规则每请求重读；高手经验在 user 底部
     [历史]   之前每一手的牌桌播报 + 它自己说过的话
-    [user]   当前牌桌 + 可选动作
-    [笔记]   最下边（每次从 牌友笔记.md 现读，改完立刻生效）
+    [user]   当前牌桌 + 可选动作 + 高手经验（放最尾巴，不顶 system 前缀）
+    [笔记]   最下边（开局快照；局中改文件，下次开桌才进 system）
 """
 
 from __future__ import annotations
@@ -28,11 +28,12 @@ import time
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 import seats
 from game import TOOLS, Decision, Game
-from referee import KINDS, RED, Action, parse_tile, tile_id, tile_name
+from referee import (KINDS, RED, Action, Referee, melds_from_ids, parse_tile,
+                     tile_id, tile_name, ting_hint_lines)
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_NOTES = HERE / "牌友笔记.md"
@@ -76,12 +77,6 @@ class ChatResult:
         return max(0, self.prompt_tokens - self.cached_tokens)
 
 
-def _room_for(budget: int) -> int:
-    """引擎会从 max_tokens 里留一块给答案（至少 512，或四分之一），留完才轮到思考。
-    想真拿到 budget，就得把这块一起报上去，否则 3000 会被砍成 2700。"""
-    return budget + max(512, budget // 3)
-
-
 def _usage_of(usage: dict | None) -> tuple[int, int]:
     """Strata 把命中的部分放在 prompt_tokens_details.cached_tokens（OpenAI 同名字段）。"""
     u = usage or {}
@@ -91,9 +86,40 @@ def _usage_of(usage: dict | None) -> tuple[int, int]:
 
 
 class StrataClient:
-    def __init__(self, url: str = "http://127.0.0.1:11436/v1/chat/completions", timeout: float = 3600.0) -> None:
+    def __init__(
+        self,
+        url: str = "http://127.0.0.1:11436/v1/chat/completions",
+        timeout: float = 3600.0,
+        *,
+        api_key: str = "",
+        headers: dict[str, str] | None = None,
+        request: dict[str, Any] | None = None,
+        temperature: float = 0.0,
+        send_reasoning_budget: bool = True,
+    ) -> None:
         self.url = url
         self.timeout = timeout
+        self.api_key = str(api_key or "")
+        self.headers = {str(k): str(v) for k, v in (headers or {}).items()}
+        self.request = dict(request or {})
+        self.temperature = float(temperature)
+        self.send_reasoning_budget = bool(send_reasoning_budget)
+
+    @classmethod
+    def from_profile(cls, profile: Any) -> "StrataClient":
+        """按 profiles/<名字>/profile.json 的 llm 段建客户端。"""
+        try:
+            temperature = float(profile.request.get("temperature") or 0.0)
+        except (TypeError, ValueError):
+            temperature = 0.0
+        return cls(
+            profile.base_url,
+            api_key=profile.api_key,
+            headers=profile.headers,
+            request=profile.request,
+            temperature=temperature,
+            send_reasoning_budget=profile.reasoning_budget,
+        )
 
     def chat(
         self,
@@ -102,19 +128,24 @@ class StrataClient:
         model: str = "strata",
         tools: list[dict] | None = None,
         tool_choice=None,
-        max_tokens: int = 1400,
-        temperature: float = 0.0,
+        temperature: float | None = None,
         reasoning_budget: int | None = None,
         on_response: Callable | None = None,
         stream: bool = False,
         on_delta: Callable | None = None,
     ) -> ChatResult:
-        body: dict = {"model": model, "messages": messages, "max_tokens": max_tokens,
-                      "temperature": temperature}
-        if reasoning_budget is not None:
+        # profile.llm.request 里除标准字段外的厂商参数（如 thinking、max_tokens）原样带上；
+        # model/messages/temperature 仍由这一手决定，不能被档案里的默认值顶掉。
+        body: dict = dict(self.request)
+        body.update({"model": model, "messages": messages,
+                     "temperature": self.temperature if temperature is None else temperature})
+        if reasoning_budget is not None and self.send_reasoning_budget:
             # Strata #123：思考到这么多 token 就自己收尾（注入一句 wrap-up + </think>），
             # 把剩下的预算留给回答。0 表示不限。
             body["reasoning_budget_tokens"] = int(reasoning_budget)
+        else:
+            # 云端接口不认这个 Strata 私有字段；档案里关掉时连默认值也不带。
+            body.pop("reasoning_budget_tokens", None)
         if tools:
             body["tools"] = tools
             body["tool_choice"] = tool_choice if tool_choice is not None else "auto"
@@ -123,8 +154,10 @@ class StrataClient:
             # 客户端断了它也看不见（server.py 的断连靠 wfile.write 抛 OSError 发现）。
             body["stream"] = True
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(self.url, data=data,
-                                     headers={"Content-Type": "application/json"})
+        headers = {"Content-Type": "application/json", **self.headers}
+        if self.api_key:
+            headers.setdefault("Authorization", f"Bearer {self.api_key}")
+        req = urllib.request.Request(self.url, data=data, headers=headers)
         t0 = time.monotonic()
         if stream:
             content: list[str] = []
@@ -267,12 +300,14 @@ class LLMPlayer:
         client: StrataClient,
         seat: int,
         *,
+        name: str | None = None,
+        persona: str | None = None,
         notes_path: Path | str = DEFAULT_NOTES,
         draft_path: Path | str | None = None,
         soft_notes_path: Path | str | None = None,
         log_path: Path | str | None = DEFAULT_LOG,
         model: str = "strata-lowthink",
-        answer_tokens: int = 600,
+        concurrency_slot: str = "",
         think_seconds: float = 3600.0,
         budget_react: int = 1000,
         budget_discard: int = 3000,
@@ -284,6 +319,8 @@ class LLMPlayer:
     ) -> None:
         self.client = client
         self.seat = seat
+        self.name = (name or f"{seat}号").strip()
+        self.persona = (persona or "").strip()
         self.notes_path = Path(notes_path)
         if draft_path:
             self.draft_path = Path(draft_path)
@@ -293,16 +330,18 @@ class LLMPlayer:
             # 自测会用临时笔记路径，草稿跟着各自走，别串台
             self.draft_path = self.notes_path.with_name(self.notes_path.stem + ".草稿.md")
         self.rules_path = HERE / "规则.txt"
+        self.tips_path = HERE / "高手的秘诀.txt"
+        self.referee = Referee()                 # 只用来算"打哪张能听"的提醒
         # 临时笔记：只这一局用，随牌桌一起贴在每手的 user 消息里（在尾巴上，不毁前缀）
         self.temp_notes_path = (Path(soft_notes_path) if soft_notes_path
                                 else HERE / "临时笔记.md")
         self.log_path = Path(log_path) if log_path else None
         self.model = model
-        self.answer_tokens = answer_tokens         # 预算之外留给"说话 + 调工具"的空间
+        self.concurrency_slot = str(concurrency_slot or "").strip()
         # 一小时之内都算没超时：想多久随它，别拿秒数去剪它的思路
         self.think_seconds = think_seconds
-        # Strata #123：思考到这么多 token 由引擎自己收尾（注入 wrap-up + </think>），
-        # 剩下的 max_tokens 留给说话和工具调用。吃叉 1000、打牌 3000。
+        # Strata #123：思考到这么多 token 由引擎自己收尾（注入 wrap-up + </think>）。
+        # 总输出上限只认 profile.llm.request.max_tokens，代码不再按每手改它。
         self.budget_react = budget_react
         self.budget_discard = budget_discard
         self.budget_ting = budget_ting         # 报听之后手牌锁死，没什么好想的
@@ -322,7 +361,11 @@ class LLMPlayer:
         self._tick_at = 0.0
         self._last_say = ""                  # 上一手说出口的那句：同一句再说一遍就是复读
 
-        self.messages: list[dict] = [{"role": "system", "content": self._system_prompt()}]
+        # 长期笔记是会话快照：局中改文件只影响下一场新开的 LLMPlayer，
+        # 不跟着每个请求热加载，免得自己改一笔就把 system 前缀顶掉。
+        self._notes_snapshot = self._read_notes()
+        self.messages: list[dict] = [{"role": "system",
+                                      "content": self._system_prompt(notes=self._notes_snapshot)}]
         self.records: list[TurnRecord] = []
         self._prefetching: bool = False
         self._prefetch_thread: threading.Thread | None = None
@@ -337,13 +380,30 @@ class LLMPlayer:
         except FileNotFoundError:
             return "每个人13张牌；无风牌 无发白 有红中。"
 
-    def _system_prompt(self) -> str:
+    def _read_tips(self) -> str:
+        """高手经验直接读 高手的秘诀.txt：每手放在 prompt 底部，不进 system，保住前缀缓存。"""
+        try:
+            return self.tips_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return ""
+
+    def _tips_block(self) -> str:
+        tips = self._read_tips()
+        if not tips:
+            return ""
+        return f"【高手经验（文件：{self.tips_path}）】\n{tips}"
+
+    def _system_prompt(self, notes: str | None = None) -> str:
         head = (
-            "你是「豆包工作」，一桌麻将里的牌友。四个玩家，另外两人随机出牌。\n"
+            f"现在要打麻将。你是「{self.name}」，这一桌的牌友。四个玩家同桌。\n"
             "说话像牌友，记账像会计。你说的话会直接显示在牌桌上。\n"
             "嘴上不交底：自己手上有什么、在等哪张、还差几组面子，一概不说；"
             "从别人亮出的面子、弃牌里推出来的结论也别在牌桌上讲。\n"
             "要开口就说场面话（催牌、玩笑、叹手气），真判断只写进笔记。\n"
+        )
+        if self.persona:
+            head += f"\n【你的性格与设定】\n{self.persona}\n"
+        head += (
             "规则（原文，以此为准）：\n"
             f"{self._read_rules()}\n"
             "报听要主动调 ting：手牌听牌之后报听，报听后手牌锁死——只能把刚摸进来的那张打回去，"
@@ -351,9 +411,21 @@ class LLMPlayer:
             "出牌必须调用工具，不许只用文字回答；牌用 m1..m9 / p1..p9 / s1..s9 / z5 表示。"
             "例外：系统已经把唯一合法动作自动落子时，不用再调工具，只说话。"
         )
-        # 笔记只在这里插一次：system 是整段对话的开头，每一手都省下一千多字的重复
-        notes = self._read_notes()
+        # 笔记只在这里插一次：一次构建里只出现一处，不会每手重复贴。
+        notes = self._read_notes() if notes is None else notes
         return f"{head}\n\n【你的笔记】\n{notes}" if notes else head
+
+    def _refresh_system_prompt(self) -> None:
+        """规则每次请求前重读；长期笔记用开局快照，局中不换。
+
+        规则改了，整段前缀缓存会失效；高手经验放在每手 prompt 底部，不动 system。
+        长期笔记也不跟着变，免得自己改一笔就把整段前缀顶掉。
+        """
+        if not self.messages:
+            return
+        content = self._system_prompt(notes=self._notes_snapshot)
+        if self.messages[0].get("content") != content:
+            self.messages[0]["content"] = content
 
     def _read_notes(self) -> str:
         try:
@@ -394,13 +466,28 @@ class LLMPlayer:
             wall_s += f"，最后一张（明牌）是 {view['wall_last']}"
         if (view.get("dead") or {}).get(view["seat"]):
             wall_s += "\n（你本局放过胡，已经不准再胡了）"
-        return (
+        score = []
+        if view.get("round"):
+            score.append(f"【第{int(view['round'])}局 · 累计输赢】")
+            names = view.get("names") or {}
+            board = view.get("board") or {}
+            for no in range(1, int(view.get("seats") or 4) + 1):
+                name = names.get(no) or names.get(str(no)) or f"{no}号"
+                # 网页给真人、接入位的显示名里带着“（你）/（接入）”。这是给屏幕看的，
+                # 不能原样喂给 LLM：它会照着名字把自己认成“3号（你）”。
+                name = re.sub(r"（[^）]*）", "", str(name)).strip() or f"{no}号"
+                if no == int(view.get("seat", -1)) + 1:
+                    name += "（你）"
+                val = int(board.get(no, board.get(str(no), 0)) or 0)
+                score.append(f"{name}（{no}号）{val:+d}")
+        body = (
             f"你手里的 {len(view['hand'])} 张：{hand}\n"
             f"你已成的面子：{fixed_s}\n"
             f"场上已成的面子（公开）：{others}\n"
             f"牌河：{table}\n"
             f"{wall_s}；上一张打出：{last_s}"
         )
+        return "\n".join(score + ([""] if score else []) + [body])
 
     def _actions_text(self, legal: Sequence[Action], *, always: bool = True) -> str:
         lines = []
@@ -461,10 +548,14 @@ class LLMPlayer:
             "这一手只有唯一合法动作，系统已经自动替你落子。你只要在牌桌上说一句人话，"
             "不超过 20 字（别报手牌、别报在等哪张），不用再调用工具。",
         ])
+        tips = self._tips_block()
+        if tips:
+            prompt += "\n\n" + tips
         try:
+            # 发言也要带同一张工具表：去掉 tools 会改写提示词开头的工具段，整段前缀缓存清零。
             r = self.client.chat(self.messages + [{"role": "user", "content": prompt}],
-                                 model=self.model, tools=None,
-                                 max_tokens=_room_for(budget), reasoning_budget=budget)
+                                 model=self.model, tools=TOOLS,
+                                 reasoning_budget=budget)
         except Exception:                                     # 说不出话就别拦着出牌
             return ""
         said = r.speech.strip()
@@ -489,13 +580,26 @@ class LLMPlayer:
             return "【现在可以吃叉】"
         return "【轮到你出牌了】"
 
+    def _ting_hints(self, d: Decision) -> list[dict]:
+        """这一手打哪张能合法单钓；只算自己的牌，不碰别人手牌。"""
+        if d.kind != "discard":
+            return []
+        if (d.view.get("ting") or {}).get(d.seat):
+            return []                           # 已经报听，不必再提示“打哪张能听”
+        try:
+            fixed = melds_from_ids(d.view.get("fixed") or [])
+            discards = [a.tile for a in d.legal
+                        if a.kind == "discard" and a.tile is not None]
+            return self.referee.discard_ting_hints(d.view.get("hand") or [], fixed, discards)
+        except Exception:
+            return []
+
     def _user_prompt(self, d: Decision, budget: int) -> str:
         soft = self._read_soft_notes()
-        parts = [
-            self._headline(d),
-            f"（思考预算 {budget} token，到点引擎会强制收尾；收尾之后先说一句话，再调用工具。）",
-            "",
-        ]
+        parts = [self._headline(d)]
+        if getattr(self.client, "send_reasoning_budget", True):
+            parts.append(f"（思考预算 {budget} token，到点引擎会强制收尾；收尾之后先说一句话，再调用工具。）")
+        parts.append("")
         if soft:
             parts += ["【本局临时笔记】", soft, ""]
         parts += [
@@ -507,14 +611,24 @@ class LLMPlayer:
             f"【本轮只能做这些】{self._actions_text(d.legal)}",
             "只能从上表里挑一个，调表外的动作会被判无效。",
         ]
+        hints = self._ting_hints(d)
+        if hints:
+            parts += ["", "【听牌提醒】", "；".join(ting_hint_lines(hints))]
         draft = self._draft_block()
         if draft:
             parts += ["", draft]
         parts += ["先说一句话跟牌桌上说点什么（不超过 25 字，别报手牌、别报在等哪张），然后必须调用工具选一个。"]
+        tips = self._tips_block()
+        if tips:
+            parts += ["", tips]
         return "\n".join(parts)
 
     # ---- 决策 ----
     def decide(self, d: Decision) -> tuple[Action | None, str]:
+        # 新一局/新窗口先回到打牌权限，别把局间 or 窗口结束的笔记权限带进牌局
+        self._phase = "play"
+        # 规则可能刚被改过：这一手开始前先换成最新 system；高手经验在 user 末尾现读
+        self._refresh_system_prompt()
         # 只有一个选项（摸牌、必过、报听后打回刚摸的那张）：不用问模型，省一次二十秒。
         # 但报听之后牌桌上还得有人味——那一手虽然锁死了，也低预算问一句，让它开口。
         if len(d.legal) == 1:
@@ -532,13 +646,14 @@ class LLMPlayer:
 
         budget = self._budget_for(d)
         prompt = self._user_prompt(d, budget)
+        base_len = len(self.messages)
         self.messages.append({"role": "user", "content": prompt})
         t0 = time.monotonic()
 
         # 一遍搞定：强制工具调用 + 思考预算。
         # 预算到点由引擎自己收尾，剩下的 token 留给"说一句话 + 调工具"。
         r1 = self.client.chat(self.messages, model=self.model, tools=d.tools(),
-                              tool_choice="required", max_tokens=_room_for(budget),
+                              tool_choice="required",
                               reasoning_budget=budget, stream=True,
                               on_delta=self._tick)
         self._note_cache("吃叉" if d.kind == "react" else "打牌", r1)
@@ -558,7 +673,7 @@ class LLMPlayer:
                 {"role": "tool", "tool_call_id": call_id, "content": done},
             ]
             r1 = self.client.chat(self.messages, model=self.model, tools=d.tools(),
-                                  tool_choice="required", max_tokens=_room_for(self.budget_tiny),
+                                  tool_choice="required",
                                   reasoning_budget=self.budget_tiny, stream=True,
                                   on_delta=self._tick)
             self._note_cache("记完接着打", r1)
@@ -585,34 +700,38 @@ class LLMPlayer:
         action = self._action_from_call(r1.tool_call, d.legal)
         source = "tool" if action else ""
 
-        # 万一没给出调用：把"它自己说的话"交给 nothink，只让它把这句话变成调用。
-        # 不带这句话，nothink 看不出结论，会随手挑一个——实测它说过"不碰，过"，却挑了个碰。
-        # 万一没给出调用：顺着这条对话再问一句，把它自己的话变成调用。
-        # 不另起会话——前缀全在原处，只 prefill 新加的这句；另起会冷跑整段。
+        # 没给出调用：不替它落子，也不把“没调工具”当成 pass。
+        # 再逼两遍，只让它把结论变成工具调用；逼不出来就暂停，绝不自动 pass。
+        # 第一次补刀要带上它刚才的话；不带，nothink 看不出结论，会随手挑一个——
+        # 实测它说过“不碰，过”，却挑了个碰。
         r2 = None
-        if action is None and time.monotonic() - t0 < self.think_seconds - 6:
+        tries = 0
+        while (action is None and tries < 2
+               and time.monotonic() - t0 < self.think_seconds - 6):
             said = speech.strip()
-            tail = (f"你刚才说的话：『{said}』。把它变成工具调用；话里说不碰、不要、过，就调用 pass。"
-                    if said else "把上面的结论变成工具调用。")
+            if tries == 0 and said:
+                tail = (f"你刚才说的话：『{said}』。把它变成工具调用；"
+                        "话里明确说不碰、不要、过，才调用 pass。")
+            else:
+                tail = ("必须调用工具，不能只说话。从上面的合法动作里选一个，"
+                        "调用对应工具；没有工具调用就不要结束这一手。")
             msgs2 = self.messages + [{"role": "user", "content": tail + " 不要说话，不要解释。"}]
             r2 = self.client.chat(msgs2, model=self.model, tools=d.tools(),
                                   tool_choice="required",
-                                  max_tokens=_room_for(self.budget_tiny),
                                   reasoning_budget=self.budget_tiny)
             self._note_cache("补刀", r2)
             action = self._action_from_call(r2.tool_call, d.legal)
             if action:
                 source = "tool2"
+                break
+            tries += 1
 
-        # 还不行就拣它说的话；再不行才兜底（兜底一定合法）
-        used_fallback = False
+        # 逼不出工具就不落子：牌桌暂停，等它重来，绝不拿 pass 顶账。
         if action is None:
-            cand = actions_from_text(speech, d.legal)
-            if len(cand) == 1:
-                action, source = cand[0], "text"
-            else:
-                action, source = self._pick_fallback(d.legal), "fallback"
-                used_fallback = True
+            del self.messages[base_len:]        # 这一手还没落子，连提问一起撤回，重来时别叠两条 user
+            why = "模型没调工具，牌桌先停一下。"
+            said = speech.strip()
+            return None, f"{said}（{why}）" if said else why
 
         # 复读闸：和上一手一模一样的话不再摆到牌桌上（牌桌本来就有动作记录）
         said = speech.strip()
@@ -623,6 +742,8 @@ class LLMPlayer:
         if said:
             self._last_say = said
 
+        # 到这儿一定有工具动作；没有“文本拣选/自动兜底”这一档了。
+        used_fallback = False
         rec = TurnRecord(len(self.records), speech, action, used_fallback, source=source,
                          reasoning=r1.reasoning, seconds=r1.seconds, tokens=r1.tokens,
                          finish=r1.finish)
@@ -644,7 +765,7 @@ class LLMPlayer:
     def _remember(self, action: Action, speech: str, reasoning: str, *, from_tool: bool) -> None:
         """按 OpenAI 标准形态记一轮：assistant 带 tool_calls，紧跟 role=tool 的回执。
 
-        它自己没调工具（文本拣选/兜底）时不编造调用，只记它说过的话。
+        它自己没调工具时不编造调用，只记它说过的话。
         """
         if speech.strip():
             said = speech.strip()
@@ -683,7 +804,13 @@ class LLMPlayer:
         except Exception:
             return None
         for cand in legal:
-            if cand.kind == a.kind and cand.tile == a.tile and tuple(cand.combo) == tuple(a.combo):
+            if cand.kind != a.kind:
+                continue
+            # win / pass / ting / bloom 的合法动作可能带 tile（点炮的胡、海底的胡），
+            # 但工具本身没有牌参数；只按 kind 认，不能拿“工具没写牌”当不合法。
+            if a.kind in ("win", "pass", "ting", "bloom"):
+                return cand
+            if cand.tile == a.tile and tuple(cand.combo) == tuple(a.combo):
                 return cand
         return None
 
@@ -705,6 +832,9 @@ class LLMPlayer:
         for a in legal:
             if a.kind == "draw":
                 return a
+        for a in legal:               # 有胡先胡：兜底也绝不把胡牌先按 pass
+            if a.kind == "win":
+                return a
         for a in legal:               # 报听阶段兜底也报：不报等于自断胡路
             if a.kind == "ting":
                 return a
@@ -718,7 +848,7 @@ class LLMPlayer:
 
     # ---- 说话：中场暂停 / 散场闲聊共用 ----
     def chat(self, text: str, *, budget: int | None = None, phase: str = "after") -> str:
-        """跟它说话。phase=pause 局中暂停，between 局间，after 整场打完。
+        """跟它说话。phase=pause 局中暂停，between 局间，after 轮次结束/整场打完。
 
         接在同一段历史后面发，工具表整局一张，前缀缓存照旧命中。
         预算按场景分：终场要改长期笔记，给 budget_final，放开让它随便改；
@@ -745,7 +875,7 @@ class LLMPlayer:
                     "可以聊刚才那几手，也可以聊别的。现在可以改长期笔记：追加或改原文都行，"
                     "改完下次开桌的顶部生效。\n")
         if phase == "after":
-            self.finish_session()          # 整场结束才并档；本场顶部 system 仍不动
+            self.finish_session()          # 整场结束才并档；本场顶部 system 仍是开局快照
         # 聊天也把这一局的临时笔记带上：局中聊完接着打，散场聊完才好把经验写进长期笔记
         soft = self._read_soft_notes()
         if soft:
@@ -792,13 +922,15 @@ class LLMPlayer:
         return reply
 
     def set_phase(self, phase: str) -> None:
-        """play / pause / after：决定笔记权限，也决定下一句话怎么开场。"""
+        """play / pause / between / after：决定笔记权限，也决定下一句话怎么开场。"""
         self._phase = phase
 
     def _chat_call(self, budget: int) -> ChatResult:
+        # 聊天前也重读：规则刚改，下一句就得看见；笔记是开局快照，不在这里换
+        self._refresh_system_prompt()
         r = self.client.chat(self.messages, model=self.model,
                              tools=TOOLS, tool_choice="auto",
-                             max_tokens=_room_for(budget), reasoning_budget=budget)
+                             reasoning_budget=budget)
         self._note_cache("暂停" if self._phase == "pause" else "闲聊", r)
         return r
 
@@ -810,6 +942,64 @@ class LLMPlayer:
             pass
         self._chatted = False
         self._last_chat_phase = None
+
+    def reset_context(self) -> None:
+        """LLM 上下文窗口结束：清对话历史，只留 system/人设。
+
+        长期笔记、长期草稿、临时笔记都不动；下一局重新从 system 开始记。
+        """
+        self.cut_prefetch()
+        self.messages = [{"role": "system",
+                          "content": self._system_prompt(notes=self._notes_snapshot)}]
+        self._chatted = False
+        self._last_chat_phase = None
+        self._pause_calls = 0
+        self._last_say = ""
+        self._phase = "play"
+
+    def context_state(self) -> dict:
+        """把这一座 LLM 的对话状态整包导出，跟着牌局快照一起存。
+
+        只导对话这一层；长期笔记/草稿/临时笔记是文件，不跟牌局回退。
+        """
+        return {
+            "messages": self.messages,
+            "pause_calls": self._pause_calls,
+            "last_say": self._last_say,
+            "chatted": self._chatted,
+            "last_chat_phase": self._last_chat_phase,
+        }
+
+    def restore_context(self, data: dict, *, clip_terminal: bool = False) -> None:
+        """把快照里的对话状态装回来。
+
+        快照如果正好拍在“提问已发、回答还没回”的缝上，尾巴上会留一条
+        没有配对的 user。这里把它剪掉，免得回退后重新 decide 又叠一条相同的提问。
+        """
+        data = data or {}
+        msgs = list(data.get("messages") or [])
+        if clip_terminal:
+            cut = None
+            for i, msg in enumerate(msgs):
+                content = str(msg.get("content") or "")
+                if msg.get("role") == "user" and "【终场聊天】" in content:
+                    cut = i
+            if cut is not None:
+                msgs = msgs[:cut]
+        # 只留成对的对话：尾巴上的裸 user / 只有 tool_call 没有 tool 回执的 assistant
+        # 都是没落子的半截，回退后会被重新问一遍。
+        while msgs and msgs[-1].get("role") == "user":
+            msgs.pop()
+        while msgs and msgs[-1].get("role") == "assistant" and msgs[-1].get("tool_calls"):
+            msgs.pop()
+        if msgs:
+            self.messages = msgs
+        self._pause_calls = int(data.get("pause_calls") or 0)
+        self._last_say = str(data.get("last_say") or "")
+        self._chatted = bool(data.get("chatted"))
+        phase = data.get("last_chat_phase")
+        self._last_chat_phase = str(phase) if phase in ("pause", "between", "after") else None
+        self._phase = "play"
 
     def finish_session(self) -> None:
         """整场打完：把草稿并进长期笔记文件（下次开桌的顶部才带上）。"""
@@ -879,8 +1069,8 @@ class LLMPlayer:
 
         学的是编辑器那一套：replace 要求 old_string 在笔记里唯一出现，
         找不到就不动、出现多次也不动（免得一刀切错地方）。
-        只写文件，历史里的 system 不动，所以下一局才生效；
-        这次改完的样子放在回执里给它看，免得它记的还是旧的。
+        只写文件；长期笔记的 system 是开局快照，下一次开桌才带上；
+        临时笔记由每手的 user 消息现读，写完立刻生效。这次改完的样子放在回执里给它看。
         """
         mode = str(args.get("mode") or "").strip().lower()
         target = str(args.get("target") or "").strip().lower()
@@ -966,11 +1156,11 @@ class LLMPlayer:
             return f"没写成：{e}"
 
     # ---- 空闲思考 ----
-    def prefetch(self, view: dict, *, max_tokens: int = 4096) -> str:
+    def prefetch(self, view: dict) -> str:
         """别人回合时跑一遍：只让它想本手怎么打，不催它出牌。
 
         这一趟**不设思考预算**——预算只在真要落子那一手才用。
-        自由时间它想多久都行，只留一个输出上限当刹车，免得跑飞了堵住下一手。
+        输出上限只认 profile 里的 max_tokens，代码不再另设。
         同一时刻只准有一个预跑在飞：只有一个模型服务，抢不到并发。
         """
         with self._lock:
@@ -978,11 +1168,16 @@ class LLMPlayer:
                 return ""
             self._prefetching = True
         try:
+            # 空闲预跑也用最新的规则；高手经验在 prompt 末尾现贴
+            self._refresh_system_prompt()
             parts: list[str] = ["【自由思考时间】现在是别人的回合，你不用出牌。有一整段空时间，"
                                 "想多深都行，先把这手牌想透。"]
             parts += ["【牌桌】", self._describe(view),
                       "想完了用三行写下来：目标形 / 浮牌 / 目标听牌。",
                       "这趟只是空想，不要调用任何工具。"]
+            tips = self._tips_block()
+            if tips:
+                parts += ["", tips]
             prompt = "\n".join(parts)
             try:
                 # 接在整段对话后面想：之前的牌桌、它说过的话、它想过的思维链都在前缀里，
@@ -990,7 +1185,6 @@ class LLMPlayer:
                 msgs = self.messages + [{"role": "user", "content": prompt}]
                 r = self.client.chat(msgs, model=self.model,
                                      tools=TOOLS, tool_choice="auto",   # 和出牌那一趟的工具表一模一样，前缀才对得上
-                                     max_tokens=max_tokens,                       # 不传 reasoning_budget
                                      stream=True,                                 # 能一边想一边被掐断
                                      on_response=self._hold)
                 self._note_cache("自由思考", r)
@@ -1208,7 +1402,7 @@ def _selftest() -> int:
     case("工具调用直接命中", (act.kind, tile_id(act.tile)), ("discard", pid))
     case("说话被保留", speech, f"我打 {pid}。")
     case("第一遍就是强制调用 + 带了思考预算", (fc.calls[0]["tool_choice"], fc.calls[0]["reasoning_budget"]), ("required", 3000))
-    case("打牌上限 = 预算 + 引擎要留的答案空间", fc.calls[0]["max_tokens"], 4000)
+    case("打牌不再由代码传 max_tokens", "max_tokens" in fc.calls[0], False)
     case("用的是 lowthink", fc.calls[0]["model"], "strata-lowthink")
 
     # 1b 吃叉只给 1000
@@ -1219,7 +1413,7 @@ def _selftest() -> int:
     pR = LLMPlayer(fcR, 1, log_path=None)
     actR, _ = pR.decide(react)
     case("吃叉预算 1000", fcR.calls[0]["reasoning_budget"], 1000)
-    case("吃叉上限 = 1000 + 512", fcR.calls[0]["max_tokens"], 1512)
+    case("吃叉也不由代码传 max_tokens", "max_tokens" in fcR.calls[0], False)
     case("吃叉也说得上话", actR.kind, "pon")
     case("吃叉提醒写的是 1000", any("思考预算 1000 token" in (m.get("content") or "") for m in pR.messages), True)
 
@@ -1250,19 +1444,45 @@ def _selftest() -> int:
     case("第二遍只多一句话", len(fc.calls[1]["messages"]) - len(fc.calls[0]["messages"]), 1)
     case("第二遍不给它重新想", (fc.calls[1]["model"], fc.calls[1]["reasoning_budget"]), ("strata-lowthink", 40))
 
-    # 3 两遍都没工具 → 文本兜底
+    # 3 两遍都没工具 → 不落子，暂停，绝不自动 pass
     fc = _FakeClient([ChatResult(content=f"我打 {pid}。"), ChatResult(content="")])
     p = LLMPlayer(fc, 0, log_path=None)
-    act, _ = p.decide(d)
-    case("文本兜底拣出那张", (act.kind, tile_id(act.tile)), ("discard", pid))
-    case("兜底不算强制兜底", p.records[-1].used_fallback, False)
+    before = list(p.messages)
+    act, say = p.decide(d)
+    case("两遍没工具不落子", act, None)
+    case("两遍没工具不写回合记录", len(p.records), 0)
+    case("两遍没工具把这一手的提问撤回", p.messages, before)
+    case("两遍没工具明说牌桌停", "模型没调工具" in say, True)
 
-    # 4 它说了手里没有的牌 → 落到合法兜底
+    # 4 它说了手里没有的牌 → 也不替它兜底
     fc = _FakeClient([ChatResult(content=f"我要打 {notin}。"), ChatResult(content="")])
     p = LLMPlayer(fc, 0, log_path=None)
     act, _ = p.decide(d)
-    case("非法建议被丢弃", p.records[-1].used_fallback, True)
-    case("兜底动作一定合法", any(a.kind == act.kind and a.tile == act.tile for a in legal), True)
+    case("非法建议也不落子", act, None)
+    case("非法建议不写回合记录", len(p.records), 0)
+
+    # 4b 能胡但没工具 → 不自动 pass（这是之前把胡牌判成放胡的根因）
+    win_d = Decision(seat=1, kind="react", view=d.view,
+                     legal=[Action("win"), Action("pass")])
+    fc = _FakeClient([ChatResult(content="胡了。"), ChatResult(content="")])
+    p = LLMPlayer(fc, 1, log_path=None)
+    act, _ = p.decide(win_d)
+    case("能胡没工具也不自动 pass", act, None)
+    case("能胡没工具不记 pass", len(p.records), 0)
+
+    # 4c 明确调了 pass 才认 pass
+    fc = _FakeClient([ChatResult(content="这手过。", tool_call={"name": "pass", "arguments": {}})])
+    p = LLMPlayer(fc, 1, log_path=None)
+    act, _ = p.decide(win_d)
+    case("明确调 pass 才认", act.kind, "pass")
+
+    # 4d 点炮胡的合法动作带 tile，工具 win 没有牌参数，也必须认
+    win_tile_d = Decision(seat=1, kind="react", view=d.view,
+                          legal=[Action("win", tile=parse_tile("s2")), Action("pass")])
+    fc = _FakeClient([ChatResult(content="收下。", tool_call={"name": "win", "arguments": {}})])
+    p = LLMPlayer(fc, 1, log_path=None)
+    act, _ = p.decide(win_tile_d)
+    case("带 tile 的胡也认 win", (act.kind, tile_id(act.tile)), ("win", "s2"))
 
     # 5 prompt 布局：笔记只在 system 里出现一次，user 只带局面和牌桌
     p2 = LLMPlayer(_FakeClient([ChatResult(content=f"打 {pid}")]), 0, log_path=None)
@@ -1275,8 +1495,26 @@ def _selftest() -> int:
     case("牌桌在提醒之后", prompt.index("【牌桌】") > prompt.index("【轮到你出牌了】"), True)
     case("预算写的是这一手的数", "思考预算 3000 token" in prompt, True)
     case("可选动作是枚举出来的", f"discard {pid}" in prompt, True)
-    case("限制写在最下面的尾巴上", prompt.rstrip().split("\n")[-3].startswith("【本轮只能做这些】"), True)
+    case("限制在牌桌后面的尾巴上", prompt.index("【本轮只能做这些】") > prompt.index("【牌桌】"), True)
+    case("高手经验在 user 最底部", prompt.rstrip().endswith(p2._read_tips().strip()), True)
     case("越界会被判无效", "调表外的动作会被判无效" in prompt, True)
+
+    # 5a 听牌提醒：只报合法单钓，并且不能把高手经验挤出最底部
+    hint_hand = "m1 m1 m1 m4 m5 m6 m7 m8 m9 p1 p2 p3 p9 s5".split()
+    hint_view = dict(d.view)
+    hint_view["hand"] = hint_hand
+    hint_view["fixed"] = []
+    hint_d = Decision(seat=0, kind="discard", view=hint_view,
+                      legal=[Action("discard", tile=parse_tile(t)) for t in hint_hand])
+    hint_prompt = p2._user_prompt(hint_d, 3000)
+    case("听牌提醒给出单钓", "打9饼→听5条" in hint_prompt, True)
+    case("听牌提醒在限制之后、秘诀之前",
+         hint_prompt.index("【听牌提醒】") > hint_prompt.index("【本轮只能做这些】")
+         and hint_prompt.index("【听牌提醒】") < hint_prompt.index("【高手经验"), True)
+    ting_hint_view = dict(hint_view)
+    ting_hint_view["ting"] = {**{s: False for s in range(4)}, 0: True}
+    ting_hint_d = Decision(seat=0, kind="discard", view=ting_hint_view, legal=hint_d.legal)
+    case("已经报听后不再提示听牌", p2._ting_hints(ting_hint_d), [])
 
     # 5b 四种局面各有各的话
     win_only = Decision(seat=1, kind="react", view=d.view,
@@ -1286,6 +1524,17 @@ def _selftest() -> int:
     case("能胡了", p2._headline(win_only), "【能胡了】")
     case("现在可以吃叉", p2._headline(pon_only), "【现在可以吃叉】")
     case("轮到你出牌了", p2._headline(d), "【轮到你出牌了】")
+
+    # 5b-1 累计输赢里不能把真人显示名里的“你”原样喂回去，只标当前 LLM 自己
+    score_view = dict(d.view)
+    score_view.update({
+        "round": 2, "seats": 4, "seat": 1,
+        "names": {1: "1号（接入）", 2: "方小满（2号）", 3: "3号（你）", 4: "夏栀（4号）"},
+        "board": {1: -16, 2: -16, 3: 40, 4: -8},
+    })
+    score_text = p2._describe(score_view)
+    case("记账簿不把真人当自己", "3号（你）" in score_text, False)
+    case("只给当前座位标你", "方小满（你）" in score_text, True)
 
     # 5b-2 报听之后只给最低预算，除非这一手能胡/能杠
     tinged = dict(d.view)
@@ -1324,7 +1573,7 @@ def _selftest() -> int:
     pC.chat("你平时打多久")
     case("第二句不再重复开场", "【终场聊天】" in fcC.calls[1]["messages"][-1]["content"], False)
     case("终场闲聊预算放开到 6000", fcC.calls[1]["reasoning_budget"], 6000)
-    case("终场 max_tokens 跟着给足", fcC.calls[1]["max_tokens"], 8000)
+    case("终场闲聊也不由代码传 max_tokens", "max_tokens" in fcC.calls[1], False)
 
     # 5d-2 报听的低预算只管出牌，散场改笔记用终场档
     fcT = _FakeClient([ChatResult(content="打这张", tool_call={"name": "discard", "arguments": {"tile": notin}}),
@@ -1539,7 +1788,7 @@ def _selftest() -> int:
     p4 = LLMPlayer(fc4, 0, log_path=None)
     p4.prefetch(view)
     case("预跑没带 reasoning_budget", "reasoning_budget" in fc4.calls[0], False)
-    case("预跑的刹车只是输出上限", fc4.calls[0]["max_tokens"], 4096)
+    case("预跑也不由代码传 max_tokens", "max_tokens" in fc4.calls[0], False)
     case("预跑带着整段对话", [m["role"] for m in fc4.calls[0]["messages"]], ["system", "user"])
     case("预跑的问题在最后一句", "【自由思考时间】" in fc4.calls[0]["messages"][-1]["content"], True)
 
@@ -1592,6 +1841,18 @@ def _selftest() -> int:
     case("assistant 带着 tool_calls", bool(last_a.get("tool_calls")), True)
     case("回执跟在调用后面", p8.messages[-1]["role"], "tool")
     case("回执的 id 对得上", p8.messages[-1]["tool_call_id"], last_a["tool_calls"][0]["id"])
+
+    # 12 牌局回退时，LLM 的整段对话也要跟着回去；半截提问不能带回来
+    saved = dict(p8.context_state())
+    p10 = LLMPlayer(_FakeClient([]), 0, log_path=None)
+    p10.restore_context(saved)
+    case("回退恢复完整对话", len(p10.messages), len(p8.messages))
+    case("回退后最后一条仍是配对的回执", p10.messages[-1]["role"], "tool")
+    half = dict(saved)
+    half["messages"] = list(saved["messages"]) + [{"role": "user", "content": "【能胡了】还没回"}]
+    p11 = LLMPlayer(_FakeClient([]), 0, log_path=None)
+    p11.restore_context(half)
+    case("半截提问回退时剪掉", p11.messages[-1]["role"], "tool")
 
     # 11 缓存命中率：正常该接近 100%，低了就是前缀被动过
     case("命中率算得对", ChatResult(prompt_tokens=1000, cached_tokens=990).hit_rate, 0.99)

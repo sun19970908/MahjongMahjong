@@ -62,6 +62,15 @@ def tile_id(t: int) -> str:
     return f"s{t - SUO0 + 1}"
 
 
+def ting_hint_lines(hints: Sequence[dict]) -> list[str]:
+    """把 discard_ting_hints() 的结果写成牌桌/LLM 都能读的一句话。"""
+    out = []
+    for h in hints:
+        waits = "、".join(tile_name(t) for t in (h.get("waits") or []))
+        out.append(f"打{tile_name(h['tile'])}→听{waits}")
+    return out
+
+
 def parse_tile(x) -> int:
     """接受 编号 / m1 / p7 / s3 / z5 / 1万 / 9饼 / 红中。"""
     if isinstance(x, bool):
@@ -118,6 +127,23 @@ class Meld:
     @property
     def is_triplet_like(self) -> bool:
         return self.kind in ("triplet", "kan")
+
+
+def melds_from_ids(fixed: Sequence[Sequence[int | str]]) -> tuple[Meld, ...]:
+    """把存档/视图里的「面子牌列表」还原成 Meld。UI 和 LLM 共用这一份。"""
+    out: list[Meld] = []
+    for raw in fixed or ():
+        ids = tuple(parse_tile(t) for t in raw)
+        if len(ids) == 4:
+            kind = "kan"
+        elif len(ids) == 3 and len(set(ids)) == 1:
+            kind = "triplet"
+        elif len(ids) == 3:
+            kind = "seq"
+        else:
+            raise ValueError(f"面子张数不对：{ids}")
+        out.append(Meld(kind, ids))
+    return tuple(out)
 
 
 def _walk_melds(c: list[int], need: int, acc: list[Meld], out: list[tuple[Meld, ...]]) -> None:
@@ -435,6 +461,24 @@ class Referee:
             return TenpaiResult(True, "PIAO_HU_EXEMPT", tuple(ws), "飘胡，可多面听", True)
         names = "、".join(tile_name(t) for t in ws)
         return TenpaiResult(False, "MULTI_WAIT", tuple(ws), f"听 {len(ws)} 张：{names}")
+
+    def discard_ting_hints(self, hand, fixed: Sequence[Meld] = (),
+                           discards: Iterable[int] | None = None) -> list[dict]:
+        """14 张手牌里，打哪张之后能 **合法单钓**。只返回能报听的，不返回多面听。"""
+        counts = list(_as_counts(hand))
+        tiles = range(KINDS) if discards is None else discards
+        out: list[dict] = []
+        seen: set[int] = set()
+        for t in tiles:
+            if t is None or not (0 <= t < KINDS) or counts[t] <= 0 or t in seen:
+                continue
+            seen.add(t)
+            c = counts.copy()
+            c[t] -= 1
+            te = self.tenpai(tuple(c), fixed)
+            if te.ok:
+                out.append({"tile": t, "waits": list(te.waits), "detail": te.detail})
+        return out
 
     def waiting_on(self, counts, tile: int, fixed: Sequence[Meld] = (), *,
                    held: bool = False) -> bool:
