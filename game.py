@@ -243,10 +243,12 @@ class Game:
             rank, dist, seat, options = self.reactors[0]
             return self._decision(seat, "react", options + [Action("pass")])
         if self.phase == "kan_draw":
-            # 后开花只在这一下判定：杠完补张，牌墙最后一张正好能胡就取它
+            # 杠后先看能不能后开花 / 报听；只有摸牌一条路时已在 _enter_kan_draw 直接抓了。
             opts = [Action("draw")]
             if self._can_bloom(self.turn):
                 opts.append(Action("bloom"))
+            if self._can_ting(self.turn):
+                opts.append(Action("ting"))
             return self._decision(self.turn, "draw", opts)
         if self.phase == "ting_declare":
             return self._decision(self.turn, "ting_declare", [Action("ting"), Action("pass")])
@@ -274,12 +276,18 @@ class Game:
             self.dead_win[seat] = True
             self._emit(Event("dead", seat, data={"by": d.kind}))
 
-        if d.kind == "draw" and action.kind in ("draw", "bloom"):
+        if d.kind == "draw" and action.kind in ("draw", "bloom", "ting"):
             if action.kind == "bloom":
                 res = self.r.validate(self._view(seat), seat, action)
                 if not res.ok:
                     raise RuntimeError(f"动作不合法：{res.code} {res.detail}")
                 self._do_bloom(seat)
+                return self.drain_events()
+            if action.kind == "ting":
+                if self.phase != "kan_draw" or not self._can_ting(seat):
+                    raise RuntimeError("这一手不能报听")
+                self._mark_ting(seat)
+                self._do_draw(seat, kan=True)
                 return self.drain_events()
             self._do_draw(seat, kan=(self.phase == "kan_draw"))
             return self.drain_events()
@@ -371,16 +379,32 @@ class Game:
         """听没听牌。规则里「不能有两张或以上胡牌」，所以双听不算，只认单听。"""
         return self.r.tenpai(self.hands[seat], self.fixed[seat]).ok
 
+    def _can_ting(self, seat: int) -> bool:
+        """杠后能不能先报听：还没报过、没弃胡，且当前手牌已经是合法单听。"""
+        return (not self.ting.get(seat) and not self.dead_win.get(seat)
+                and self._ready(seat))
+
+    def _mark_ting(self, seat: int) -> None:
+        self.ting[seat] = True
+        self.piao[seat] = is_piao_hu(tuple(self.hands[seat]), tuple(self.fixed[seat]))
+        self.ting_closed[seat] = not self.fixed[seat]      # 报听那一刻没副露 → 闭门听 + 闷
+        waits = [tile_id(t) for t in self.r.waits(self.hands[seat], self.fixed[seat])]
+        self._emit(Event("ting", seat, data={"waits": waits, "closed": self.ting_closed[seat],
+                                             "piao": self.piao[seat]}))
+
+    def _enter_kan_draw(self, seat: int) -> None:
+        """进入杠后补张。只有抓牌一条路时直接抓；能开花或报听才停下来问。"""
+        self.turn = seat
+        self.phase = "kan_draw"
+        self.last = None
+        if not self._can_bloom(seat) and not self._can_ting(seat):
+            self._do_draw(seat, kan=True)
+
     def _do_ting_declare(self, seat: int, action: Action) -> list[Event]:
         if action.kind not in ("ting", "pass"):
             raise RuntimeError(f"报听阶段只接受 ting / pass，收到 {action.kind}")
         if action.kind == "ting":
-            self.ting[seat] = True
-            self.piao[seat] = is_piao_hu(tuple(self.hands[seat]), tuple(self.fixed[seat]))
-            self.ting_closed[seat] = not self.fixed[seat]      # 报听那一刻没副露 → 闭门听 + 闷
-            waits = [tile_id(t) for t in self.r.waits(self.hands[seat], self.fixed[seat])]
-            self._emit(Event("ting", seat, data={"waits": waits, "closed": self.ting_closed[seat],
-                                                 "piao": self.piao[seat]}))
+            self._mark_ting(seat)
         # 报完（或不报）再让下家反应 / 摸牌
         self._build_reactors(self.last[0], self.last[2])
         return self.drain_events()
@@ -419,10 +443,9 @@ class Game:
             else:
                 raise RuntimeError("加杠找不到原来的碰")
             self._emit(Event("kan", seat, tile, {"kind": "added"}))
-        self.phase = "kan_draw"
         self.kans[seat] += 1
         self.after_kan = seat            # 他杠完这一下要摸补张：打出去被胡就是「流泪」
-        self.last = None
+        self._enter_kan_draw(seat)
 
     # ---------- 反应 ----------
     def _build_reactors(self, discarder: int, tile: int) -> None:
@@ -492,7 +515,7 @@ class Game:
             self.kans[seat] += 1
             self.after_kan = seat
             self._emit(Event("kan", seat, tile, {"kind": "open", "from": src}))
-            self.turn, self.phase, self.last = seat, "kan_draw", None
+            self._enter_kan_draw(seat)
             return self.drain_events()
 
         raise RuntimeError(f"反应阶段不接受 {action.kind}")
@@ -834,7 +857,7 @@ def _selftest() -> int:
     g.wall = deque([parse_tile("1万")] * 5 + [p9])
     g.turn, g.phase, g.last, g.drawn = 0, "kan_draw", None, None
     d = g.pending()
-    case("杠完就能后开花", [a.kind for a in d.legal], ["draw", "bloom"])
+    case("杠完就能后开花", [a.kind for a in d.legal], ["draw", "bloom", "ting"])
     ev = g.apply(Action("bloom"))
     case("后开花就是胡", (g.result["type"], g.result["seat"], g.result["bloom"]), ("win", 0, True))
     case("取走的是牌墙最后一张", (ev[0].tile, len(g.wall)), (p9, 5))
@@ -861,7 +884,26 @@ def _selftest() -> int:
     g.hands[0] = _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼")
     g.wall = deque([parse_tile("1万")] * 5 + [parse_tile("4饼")])
     g.turn, g.phase, g.last, g.drawn = 0, "kan_draw", None, None
-    case("杠完但尾张补不成胡，也不能开花", [a.kind for a in g.pending().legal], ["draw"])
+    case("杠完但尾张补不成胡，也不能开花", [a.kind for a in g.pending().legal], ["draw", "ting"])
+
+    # 杠后可以直接报听：报完自动补张，补进来的牌就是唯一能打的那张
+    g = Game(GameConfig(seed=16))
+    g.start()
+    for s in range(4):
+        g.hands[s] = [0] * KINDS
+        g.fixed[s] = []
+        g.discards[s] = []
+    g.fixed[0] = [Meld("kan", (p4, p4, p4, p4))]
+    g.hands[0] = _h("1万 2万 3万 4万 5万 6万 7条 8条 9条 9饼")
+    g.wall = deque([parse_tile("1万")] * 5 + [parse_tile("4饼")])
+    g.turn, g.phase, g.last, g.drawn = 0, "kan_draw", None, None
+
+    head = g.wall[0]
+    ev = g.apply(Action("ting"))
+    case("杠后报听：听牌标记立起来", g.ting[0], True)
+    case("杠后报听：直接补张", g.phase, "discard")
+    case("杠后报听：补张从牌头摸", [e.tile for e in ev if e.type == "kan_draw"], [head])
+    case("杠后报听：只能打回补张", [a.tile for a in g.pending().legal], [head])
 
     g = Game(GameConfig(seed=15))
     g.start()
@@ -889,11 +931,12 @@ def _selftest() -> int:
     case("没有暗杠这回事，只有手里四张的明杠",
          any(a.kind == "kan" and (a.meta or {}).get("kind") == "closed" for a in d.legal), False)
     kan = next(a for a in d.legal if a.kind == "kan" and a.tile == tile)
-    g.apply(kan)
-    case("加杠后进入补张", g.phase, "kan_draw")
-    ev = g.apply(Action("draw"))
-    case("补张从牌头摸", ev[0].tile, before_head)
+    ev = g.apply(kan)
+    case("加杠后没别的选，直接补张", g.phase, "discard")
+    draws = [e for e in ev if e.type == "kan_draw"]
+    case("补张从牌头摸", draws[0].tile if draws else None, before_head)
     case("补张后牌墙少一张", len(g.wall), before_wall - 1)
+    case("补张后没有弃胡", g.dead_win[0], False)
 
     # 6 抢杠：已报听的人可以胡别人加杠的那张
     def rob_setup(listen: bool) -> Game:
@@ -923,7 +966,7 @@ def _selftest() -> int:
     case("抢杠胡成立", (g.result["type"], g.result["seat"], g.result["rob"]), ("win", 1, True))
     codes = [f["code"] for f in g.result["settle"]["payer_fans"]["0"]]
     case("抢杠结算：点炮和流泪都在", ("discard" in codes, "tears" in codes), (True, True))
-    case("没报听的人抢不了杠", rob_setup(listen=False).phase, "kan_draw")
+    case("没报听的人抢不了杠", rob_setup(listen=False).phase, "discard")
 
     # 6b 手里四张直接亮出来杠，别人能抢
     g = Game(GameConfig(seed=12))
@@ -963,7 +1006,7 @@ def _selftest() -> int:
     g.rob = None
     g.reactors = [(1, 1, 0, [Action("kan", tile=p7, meta={"kind": "open", "from": 2})])]
     g.apply(Action("kan", tile=p7, meta={"kind": "open", "from": 2}))
-    case("别人打的牌杠出来没人抢", g.phase, "kan_draw")
+    case("别人打的牌杠出来没人抢", g.phase, "discard")
 
     # 6d 抢杠优先于后开花：杠的人尾张本来能开花，也得先让人抢
     def bloom_rob_setup() -> Game:
@@ -993,7 +1036,7 @@ def _selftest() -> int:
             break
         g.apply(Action("pass"))
     case("没人抢才轮到杠的人补张", g.phase, "kan_draw")
-    case("没人抢，尾张能胡才给开花", [a.kind for a in g.pending().legal], ["draw", "bloom"])
+    case("没人抢，尾张能胡才给开花", [a.kind for a in g.pending().legal], ["draw", "bloom", "ting"])
 
     # 6e 放过胡就锁死本局：能胡的时候 pass，这局不准再胡
     def pass_setup() -> Game:

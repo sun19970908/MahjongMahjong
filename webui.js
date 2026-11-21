@@ -266,7 +266,13 @@
       if (state.pending.seat === state.own_seat) {
         const kind = state.pending.kind;
         const hasBloom = (state.actions || []).some((a) => a.kind === "bloom");
-        if (kind === "draw" && hasBloom) title = "杠后补张：选摸牌或后开花";
+        const hasTing = (state.actions || []).some((a) => a.kind === "ting");
+        if (kind === "draw" && (hasBloom || hasTing)) {
+          const choices = ["摸牌"];
+          if (hasBloom) choices.push("后开花");
+          if (hasTing) choices.push("报听");
+          title = `杠后补张：选${choices.join("/")}`;
+        }
         else if (kind === "draw") title = "轮到你摸牌";
         else if (kind === "discard") title = "轮到你了";
         else if (kind === "react") title = "别人打牌：选碰/吃/杠/胡/过";

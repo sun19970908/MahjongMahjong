@@ -223,8 +223,12 @@ class TuiUi:
             return "最后四张：抓了不打，能胡就胡（海底捞月），不能胡就过（/p 暂停）"
         if d.kind == "ting_declare" and p and p.supports == "human":
             return "你听牌了，报不报？（/p 暂停）"
-        if d.kind == "draw" and any(a.kind == "bloom" for a in d.legal) and p and p.supports == "human":
-            return "杠后补张：能后开花就输 2，正常摸牌输 1（/p 暂停）"
+        if d.kind == "draw" and p and p.supports == "human" and \
+                any(a.kind in ("bloom", "ting") for a in d.legal):
+            opts = {"draw": "摸牌", "bloom": "后开花", "ting": "报听"}
+            return "杠后补张：" + "，".join(
+                f"{opts.get(a.kind, a.kind)}输 {i}" for i, a in enumerate(d.legal, 1)
+            ) + "（/p 暂停）"
         if p and p.supports == "human":
             return "轮到你了（/p 暂停）"
         if p and p.supports == "external":

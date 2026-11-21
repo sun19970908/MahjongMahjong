@@ -616,8 +616,15 @@ class LLMPlayer:
         """一句话说清现在是什么时刻，别让它自己猜。"""
         if d.kind == "ting_declare":
             return "【手牌听牌了，报不报？】"
-        if any(a.kind == "bloom" for a in d.legal):
-            return "【能后开花】"
+        if d.kind == "draw":
+            bloom = any(a.kind == "bloom" for a in d.legal)
+            ting = any(a.kind == "ting" for a in d.legal)
+            if bloom and ting:
+                return "【杠后补张：能后开花，也能报听】"
+            if bloom:
+                return "【杠后补张：能后开花】"
+            if ting:
+                return "【杠后补张：可以报听】"
         if any(a.kind == "win" for a in d.legal):
             return "【能胡了】"
         if d.kind == "react":
