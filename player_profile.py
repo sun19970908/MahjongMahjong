@@ -3,6 +3,7 @@
 profile.json 放姓名和这一座 LLM 的接入配置；完整人设单独写在 性格档案.md，
 由 persona 读进来拼进系统提示词。笔记、日志、战绩也都放在同一个目录里。
 座位是牌桌临时分配，不写进档案；没指定座位时由牌桌随机安排。
+顶层 "freeThinking": false 可关掉这一座的空闲自由思考；不写默认开。
 
 profile.json 的 llm 段照 llm.config.json 的写法：
     "llm": {
@@ -71,6 +72,14 @@ class PlayerProfile:
     def reasoning_budget(self) -> bool:
         """是否给这一座发 Strata 的 reasoning_budget_tokens；云端接口一般关掉。"""
         raw = self.llm.get("reasoningBudget", self.llm.get("reasoning_budget"))
+        if isinstance(raw, str):
+            return raw.strip().lower() not in ("0", "false", "no", "off")
+        return True if raw is None else bool(raw)
+
+    @property
+    def free_thinking(self) -> bool:
+        """是否允许这一座在别人回合时后台预跑自由思考；默认允许。"""
+        raw = self.meta.get("freeThinking", self.meta.get("free_thinking"))
         if isinstance(raw, str):
             return raw.strip().lower() not in ("0", "false", "no", "off")
         return True if raw is None else bool(raw)

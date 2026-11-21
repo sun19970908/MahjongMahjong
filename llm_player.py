@@ -330,6 +330,7 @@ class LLMPlayer:
         log_path: Path | str | None = DEFAULT_LOG,
         model: str = "strata-lowthink",
         concurrency_slot: str = "",
+        free_thinking: bool = True,
         think_seconds: float = 3600.0,
         budget_react: int = 1000,
         budget_discard: int = 3000,
@@ -360,6 +361,7 @@ class LLMPlayer:
         self.log_path = Path(log_path) if log_path else None
         self.model = model
         self.concurrency_slot = str(concurrency_slot or "").strip()
+        self.free_thinking = bool(free_thinking)
         # 一小时之内都算没超时：想多久随它，别拿秒数去剪它的思路
         self.think_seconds = think_seconds
         # Strata #123：思考到这么多 token 由引擎自己收尾（注入 wrap-up + </think>）。
@@ -1252,6 +1254,8 @@ class LLMPlayer:
         输出上限只认 profile 里的 max_tokens，代码不再另设。
         同一时刻只准有一个预跑在飞：只有一个模型服务，抢不到并发。
         """
+        if not self.free_thinking:
+            return ""
         with self._lock:
             if self._prefetching:
                 return ""
@@ -1947,6 +1951,14 @@ def _selftest() -> int:
     case("预跑也不由代码传 max_tokens", "max_tokens" in fc4.calls[0], False)
     case("预跑带着整段对话", [m["role"] for m in fc4.calls[0]["messages"]], ["system", "user"])
     case("预跑的问题在最后一句", "【自由思考时间】" in fc4.calls[0]["messages"][-1]["content"], True)
+
+    # 7b profile 关掉自由思考：不发请求，也不往历史里塞空想
+    fcNoPref = _FakeClient([ChatResult(content="不该想")])
+    pNoPref = LLMPlayer(fcNoPref, 0, log_path=None, free_thinking=False)
+    before_no_pref = list(pNoPref.messages)
+    case("关闭自由思考返回空", pNoPref.prefetch(view), "")
+    case("关闭后不发请求", len(fcNoPref.calls), 0)
+    case("关闭后不动历史", pNoPref.messages, before_no_pref)
 
     # 8 轮到它出牌：先掐断自由思考，再进打牌思考
     class _Sock:

@@ -58,6 +58,8 @@ python rollback.py --latest     # 回到最近一帧
 
 ```json
 {
+  "name": "方小满",
+  "freeThinking": true,
   "llm": {
     "baseUrl": "http://127.0.0.1:11436/v1/chat/completions",
     "apiKey": "",
@@ -71,6 +73,8 @@ python rollback.py --latest     # 回到最近一帧
   }
 }
 ```
+
+`freeThinking` 控制这一座是否允许在别人回合后台预跑“自由思考”，默认 `true`；设 `false` 就不会再发起空闲预跑，也不往上下文里写空想。
 
 `llm.request` 里的参数会原样带给接口（如 `thinking`）；`model`、`messages`、`temperature` 每手由牌局覆盖，`max_tokens` 只认档案里这一份，代码不再按每手改它。`reasoningBudget` 是 Strata 的思考预算开关：`true` 才发 `reasoning_budget_tokens`，出牌提示里也会写“思考预算 N token”；接云端 OpenAI 兼容接口时设 `false`，请求和提示都不再提思考预算，只保留档案里的 `max_tokens` 输出上限。老的顶层 `model` 写法仍能读。
 

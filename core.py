@@ -522,6 +522,7 @@ class TableCore:
                 kwargs.update(
                     model=profile.model,
                     concurrency_slot=profile.concurrency_slot,
+                    free_thinking=profile.free_thinking,
                     name=profile.display_name,
                     persona=profile.persona,
                     notes_path=profile.notes_path,
@@ -619,7 +620,8 @@ class TableCore:
                 self._pending_since = time.monotonic()
 
             prefetched = False
-            if d.seat == self.me and self.llm and not self.cfg.no_prefetch:
+            if (d.seat == self.me and self.llm and not self.cfg.no_prefetch
+                    and self.llm.impl.free_thinking):
                 try:
                     self.llm.impl.prefetch_async(self._llm_view(game.observe(self.buddy)))
                     prefetched = True
