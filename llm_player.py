@@ -517,6 +517,7 @@ class LLMPlayer:
         self.on_progress: Callable | None = None   # 流式心跳钩子：(kind, 想字, 说字)
         self._tick_at = 0.0
         self._last_say = ""                  # 上一手说出口的那句：同一句再说一遍就是复读
+        self._chat_locked = False            # 已经说过话：这一手后面再调 chat 就算违规
 
         # 长期笔记是会话快照：局中改文件只影响下一场新开的 LLMPlayer，
         # 不跟着每个请求热加载，免得自己改一笔就把 system 前缀顶掉。
@@ -716,6 +717,17 @@ class LLMPlayer:
                     texts.append(str(text))
         return self._short_say(" ".join(texts)) if texts else ""
 
+    def _chat_receipt(self, call: dict, *, blocked: bool = False) -> str:
+        """chat 只有真拿到 text 才算出过声；已经说过话后再调 chat 直接报错。"""
+        if blocked:
+            return "错误：现在禁止调用chat，马上调用其他工具打牌。"
+        args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+        args, _ = _recover_tool_args("chat", str(call.get("raw_arguments") or ""), args)
+        text = args.get("text") if isinstance(args, dict) else ""
+        if not str(text or "").strip():
+            return "发言为空，略过。"
+        return "发言成功，现在禁止调用chat，马上调用其他工具打牌"
+
     def _append_round(self, r: ChatResult, calls: list[dict], receipts: list[str]) -> None:
         """按 OpenAI 标准回放一轮：assistant 带原始 tool_calls，后面跟配对的 tool 回执。"""
         if not calls:
@@ -752,8 +764,10 @@ class LLMPlayer:
             })
             self.messages.append({"role": "user", "content": "你没有调用工具"})
             return
-        receipts = ["已发到牌桌。" if c.get("name") == "chat"
+        receipts = [self._chat_receipt(c, blocked=self._chat_locked) if c.get("name") == "chat"
                     else "你没有调用工具，或工具格式错误。" for c in calls]
+        if any(r == "发言成功，现在禁止调用chat，马上调用其他工具打牌" for r in receipts):
+            self._chat_locked = True
         self._append_round(r, calls, receipts)
 
     def _speak(self, d: Decision, budget: int) -> str:
@@ -861,6 +875,7 @@ class LLMPlayer:
     def decide(self, d: Decision) -> tuple[Action | None, str]:
         # 新一局/新窗口先回到打牌权限，别把局间 or 窗口结束的笔记权限带进牌局
         self._phase = "play"
+        self._chat_locked = False
         # 规则可能刚被改过：这一手开始前先换成最新 system；高手经验在 user 末尾现读
         self._refresh_system_prompt()
         # 只有一个选项（摸牌、必过、报听后打回刚摸的那张）：不用问模型，省一次二十秒。
@@ -905,8 +920,10 @@ class LLMPlayer:
         # 只有 chat、没有动作时，才像以前一样补一轮要动作。
         if chat_calls and len(action_calls) <= 1 and (not action_calls or action is not None):
             self._append_round(r1, chat_calls,
-                               ["已发到牌桌。"] * len(chat_calls))
+                               [self._chat_receipt(c, blocked=self._chat_locked) for c in chat_calls])
             if action is None:
+                # 已经给过 chat 回执：下一轮再调 chat 就是违规，回错误，不再算发言成功。
+                self._chat_locked = True
                 r1 = self.client.chat(self.messages, model=self.model, tools=d.tools(),
                                       tool_choice="required",
                                       reasoning_budget=self.budget_tiny, stream=True,
@@ -916,7 +933,8 @@ class LLMPlayer:
                 calls, action_calls, chat_calls, action = read_calls(r1)
                 if action is not None and chat_calls:
                     self._append_round(r1, chat_calls,
-                                       ["已发到牌桌。"] * len(chat_calls))
+                                       [self._chat_receipt(c, blocked=self._chat_locked)
+                                        for c in chat_calls])
 
         # 它这一手可能只想先记一笔临时笔记：写下去，再让它接着走这一手（记笔记不算一次动作）
         if len(calls) == 1 and calls[0].get("name") == "edit_note":
@@ -940,7 +958,8 @@ class LLMPlayer:
             calls, action_calls, chat_calls, action = read_calls(r1)
             if action is not None and chat_calls:
                 self._append_round(r1, chat_calls,
-                                   ["已发到牌桌。"] * len(chat_calls))
+                                   [self._chat_receipt(c, blocked=self._chat_locked)
+                                    for c in chat_calls])
 
         # 它要中场暂停：这一手不打；pause.why 就是它的发言，不用再调 chat。
         # 同一个回合最多喊两次，防止它一直"我再想想"把牌局拖死
@@ -984,7 +1003,8 @@ class LLMPlayer:
                 if action:
                     if chat_calls and len(action_calls) == 1:
                         self._append_round(r2, chat_calls,
-                                           ["已发到牌桌。"] * len(chat_calls))
+                                           [self._chat_receipt(c, blocked=self._chat_locked)
+                                            for c in chat_calls])
                     source = "tool2"
                     break
             except Exception:
@@ -1768,10 +1788,37 @@ def _selftest() -> int:
     actChat, sayChat = pChat.decide(d)
     case("chat 说完再出牌", (actChat.kind, tile_id(actChat.tile)), ("discard", pid))
     case("chat 的话带上桌", sayChat, "这张我先走")
-    case("chat 有回执", any(m.get("content") == "已发到牌桌。" for m in pChat.messages), True)
+    case("chat 有回执", any(m.get("content") == "发言成功，现在禁止调用chat，马上调用其他工具打牌" for m in pChat.messages), True)
     case("chat 后仍用同一张工具表", fcChat.calls[1]["tools"] == TOOLS, True)
 
-    # 1a2 chat 和打牌同一轮回来：两句都收，不再多问一遍
+    # 1a1 已经说过话后再调 chat：回错误，不算第二次发言
+    fcChatTwice = _FakeClient([
+        ChatResult(tool_call={"name": "chat", "arguments": {"text": "我先说一句"}}),
+        ChatResult(tool_call={"name": "chat", "arguments": {"text": "我再说一句"}}),
+        ChatResult(tool_call={"name": "discard", "arguments": {"tile": pid}}),
+    ])
+    pChatTwice = LLMPlayer(fcChatTwice, 0, log_path=None)
+    actChatTwice, _ = pChatTwice.decide(d)
+    case("第二次 chat 报错",
+         any(m.get("content") == "错误：现在禁止调用chat，马上调用其他工具打牌。"
+             for m in pChatTwice.messages), True)
+    case("第二次 chat 后仍能补出动作", (actChatTwice.kind, tile_id(actChatTwice.tile)),
+         ("discard", pid))
+
+    # 1a2 chat 为空：它确实调了 chat，不能报“没有调用工具”
+    fcChatEmpty = _FakeClient([
+        ChatResult(tool_calls=[{"id": "ce", "name": "chat", "arguments": {},
+                                "raw_arguments": "{", "parse_ok": False}]),
+        ChatResult(tool_call={"name": "discard", "arguments": {"tile": pid}}),
+    ])
+    pChatEmpty = LLMPlayer(fcChatEmpty, 0, log_path=None)
+    actChatEmpty, sayChatEmpty = pChatEmpty.decide(d)
+    case("空 chat 不上桌", sayChatEmpty, "")
+    case("空 chat 不报没调用工具",
+         any(m.get("content") == "发言为空，略过。" for m in pChatEmpty.messages), True)
+    case("空 chat 后仍能出牌", (actChatEmpty.kind, tile_id(actChatEmpty.tile)), ("discard", pid))
+
+    # 1a3 chat 和打牌同一轮回来：两句都收，不再多问一遍
     fcCA = _FakeClient([ChatResult(tool_calls=[
         {"id": "c1", "name": "chat", "arguments": {"text": "我先说一句"},
          "raw_arguments": '{"text": "我先说一句"}', "parse_ok": True},
@@ -1784,7 +1831,7 @@ def _selftest() -> int:
          ("discard", pid, "我先说一句"))
     case("chat 和打牌同轮只问一次", len(fcCA.calls), 1)
     case("同轮的 chat 仍有回执",
-         any(m.get("content") == "已发到牌桌。" for m in pCA.messages), True)
+         any(m.get("content") == "发言成功，现在禁止调用chat，马上调用其他工具打牌" for m in pCA.messages), True)
     case("同轮的打牌仍有回执",
          any(m.get("content") == "已执行：discard " + pid for m in pCA.messages), True)
 
