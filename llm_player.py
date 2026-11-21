@@ -43,9 +43,10 @@ DEFAULT_LOG = HERE / "llm_log.jsonl"
 # 旧存档里写进历史的占位话：模型会把它当成自己上一句台词照着念，一句都别再摆上桌
 _FILLERS = frozenset({"（闲下来想这手牌，还没想完）", "（闲下来想这手牌,还没想完）"})
 
-# 任何时候都能喊的两件事（不算这一手）：说两句停一下、记条笔记。
-# 以前只有"中场暂停 / 散场闲聊"才提，出牌那手它根本不知道还能这么干。
-_ALWAYS = ("；另外这两件随手就能喊：pause（这手先不打，停下来跟他说两句）、"
+# 任何时候都能喊的三件事（不算这一手）：聊天、说两句停一下、记条笔记。
+# chat 常驻工具表是为了前缀缓存；闲聊禁用靠提示词和调用校验，不靠删 schema。
+_ALWAYS = ("；另外这三件随手就能喊：chat（打牌时只走工具，用它说一句，不超过20字，别报手牌/听牌/计划）、"
+           "pause（这手先不打，why 直接说，不用再调 chat）、"
            "edit_note（临时笔记 target=temp；长期笔记局中只能 target=long 追加草稿，记完接着打这一手）")
 
 
@@ -62,6 +63,7 @@ class ChatResult:
     aborted: bool = False              # 流被掐断：里面只有半截
     prompt_tokens: int = 0             # 这次请求的 prompt 有多少 token
     cached_tokens: int = 0             # 其中命中前缀缓存的有多少
+    decode_seconds: float = 0.0        # 从第一个输出 token 到流结束；0 表示没量到
 
     @property
     def speech(self) -> str:
@@ -75,6 +77,14 @@ class ChatResult:
     def read_tokens(self) -> int:
         """真正要重读的部分：新增的那一段。前缀没被动过时它就该只剩这点。"""
         return max(0, self.prompt_tokens - self.cached_tokens)
+
+    @property
+    def output_speed(self) -> float:
+        """输出速度（tok/s）：优先按流式解码时间算，没量到就退回总耗时。"""
+        if not self.tokens:
+            return 0.0
+        seconds = self.decode_seconds or self.seconds
+        return self.tokens / seconds if seconds > 0 else 0.0
 
 
 def _usage_of(usage: dict | None) -> tuple[int, int]:
@@ -149,10 +159,10 @@ class StrataClient:
         if tools:
             body["tools"] = tools
             body["tool_choice"] = tool_choice if tool_choice is not None else "auto"
-        if stream:
-            # 只有流式它才会一边生成一边往外写；非流式要等生成完才写，
-            # 客户端断了它也看不见（server.py 的断连靠 wfile.write 抛 OSError 发现）。
-            body["stream"] = True
+        # 必须显式覆盖 profile.request 里的默认值：档案常带 "stream": true，
+        # 非流式调用（_speak / 补刀）如果只写 if stream，就会拿到 SSE，
+        # 后面按 JSON 解析直接报 Expecting value。
+        body["stream"] = bool(stream)
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json", **self.headers}
         if self.api_key:
@@ -166,6 +176,7 @@ class StrataClient:
             finish = ""
             aborted = False
             usage: dict | None = None
+            first_at: float | None = None
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 if on_response:
                     on_response(resp)
@@ -185,6 +196,10 @@ class StrataClient:
                             usage = obj["usage"]
                         choice = (obj.get("choices") or [{}])[0]
                         delta = choice.get("delta") or {}
+                        has_output = bool(delta.get("content") or delta.get("reasoning_content")
+                                          or delta.get("tool_calls"))
+                        if has_output and first_at is None:
+                            first_at = time.monotonic()
                         if delta.get("content"):
                             content.append(delta["content"])
                         if delta.get("reasoning_content"):
@@ -207,6 +222,8 @@ class StrataClient:
                 except Exception:
                     aborted = True       # 连接被掐：已经吐出来的照样带走，别扔
             prompt_tokens, cached_tokens = _usage_of(usage)
+            tokens = int((usage or {}).get("completion_tokens") or 0)
+            end_at = time.monotonic()
             tc = None
             for slot in calls.values():
                 if not slot["name"]:
@@ -218,8 +235,12 @@ class StrataClient:
                 tc = {"name": slot["name"], "arguments": args}
                 break
             return ChatResult(content="".join(content), reasoning="".join(reasoning),
-                              tool_call=tc, seconds=round(time.monotonic() - t0, 2), finish=finish,
-                              aborted=aborted, prompt_tokens=prompt_tokens, cached_tokens=cached_tokens)
+                              tool_call=tc, tokens=tokens,
+                              seconds=round(end_at - t0, 2), finish=finish,
+                              aborted=aborted, prompt_tokens=prompt_tokens,
+                              cached_tokens=cached_tokens,
+                              decode_seconds=(round(end_at - first_at, 2)
+                                              if first_at is not None else 0.0))
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             if on_response:
                 on_response(resp)       # 让别人能在读的过程中把它掐掉
@@ -245,6 +266,7 @@ class StrataClient:
             finish=payload["choices"][0].get("finish_reason", ""),
             prompt_tokens=prompt_tokens,
             cached_tokens=cached_tokens,
+            decode_seconds=round(dt, 2),
         )
 
 
@@ -354,7 +376,7 @@ class LLMPlayer:
         self._last_chat_phase: str | None = None   # 上次聊天的场景：换场景要重新递笔记
         self._phase = "play"                 # play / pause / between / after：笔记权限按这个分
         self._pause_calls = 0                # 这一回合它喊了几次暂停
-        self._long_draft: list[str] = []     # 整场追加的长期笔记草稿，全部打完再并档
+        self._long_draft: list[str] = []     # 本上下文窗口追加的长期笔记草稿，窗口结束就并档
         self._long_draft_in_notes = False    # 草稿是否已经落进长期笔记文件
         self._load_long_draft()
         self.on_progress: Callable | None = None   # 流式心跳钩子：(kind, 想字, 说字)
@@ -408,8 +430,10 @@ class LLMPlayer:
             f"{self._read_rules()}\n"
             "报听要主动调 ting：手牌听牌之后报听，报听后手牌锁死——只能把刚摸进来的那张打回去，"
             "可以杠，不能碰不能吃；没报听不能胡。\n"
-            "出牌必须调用工具，不许只用文字回答；牌用 m1..m9 / p1..p9 / s1..s9 / z5 表示。"
-            "例外：系统已经把唯一合法动作自动落子时，不用再调工具，只说话。"
+            "轮到你出牌、吃叉时必须调用工具，不要输出正文，只输出工具调用；"
+            "正常说话走 chat 工具，要停手走 pause（why 直接说）；"
+            "牌用 m1..m9 / p1..p9 / s1..s9 / z5 表示。"
+            "例外：系统已经把唯一合法动作自动落子时，不用再调动作工具，只调用 chat 说一句，不要输出正文。"
         )
         # 笔记只在这里插一次：一次构建里只出现一处，不会每手重复贴。
         notes = self._read_notes() if notes is None else notes
@@ -535,6 +559,18 @@ class LLMPlayer:
         """能胡、能杠、能后开花：这几下值得把预算给满。"""
         return any(a.kind in ("win", "kan", "bloom") for a in d.legal)
 
+    @staticmethod
+    def _short_say(text: object, limit: int = 20) -> str:
+        """牌桌发言：一行、不超过 limit 字；chat 参数统一从这里过。"""
+        return " ".join(str(text or "").split())[:limit]
+
+    def _speech(self, r: ChatResult) -> str:
+        """打牌时只认 chat 工具里的发言，正文一律不上桌。"""
+        tc = r.tool_call or {}
+        if tc.get("name") == "chat":
+            return self._short_say((tc.get("arguments") or {}).get("text"))
+        return ""
+
     def _speak(self, d: Decision, budget: int) -> str:
         """锁死的手也要出声：只要一句话，不要结论。
 
@@ -545,8 +581,8 @@ class LLMPlayer:
             "【牌桌】",
             self._describe(d.view),
             f"【本轮只能做这些】{self._actions_text(d.legal, always=False)}",
-            "这一手只有唯一合法动作，系统已经自动替你落子。你只要在牌桌上说一句人话，"
-            "不超过 20 字（别报手牌、别报在等哪张），不用再调用工具。",
+            "这一手只有唯一合法动作，系统已经自动替你落子。不要输出正文，只调用 chat 工具说一句，"
+            "不超过 20 字（别报手牌、别报在等哪张）；动作已经落好，不要再调动作工具。",
         ])
         tips = self._tips_block()
         if tips:
@@ -555,10 +591,11 @@ class LLMPlayer:
             # 发言也要带同一张工具表：去掉 tools 会改写提示词开头的工具段，整段前缀缓存清零。
             r = self.client.chat(self.messages + [{"role": "user", "content": prompt}],
                                  model=self.model, tools=TOOLS,
-                                 reasoning_budget=budget)
+                                 reasoning_budget=budget,
+                                 stream=True, on_delta=self._tick)
         except Exception:                                     # 说不出话就别拦着出牌
             return ""
-        said = r.speech.strip()
+        said = self._speech(r)
         if said in _FILLERS or (said and said == self._last_say):
             said = ""
         if said:
@@ -598,7 +635,7 @@ class LLMPlayer:
         soft = self._read_soft_notes()
         parts = [self._headline(d)]
         if getattr(self.client, "send_reasoning_budget", True):
-            parts.append(f"（思考预算 {budget} token，到点引擎会强制收尾；收尾之后先说一句话，再调用工具。）")
+            parts.append(f"（思考预算 {budget} token，到点引擎会强制收尾；收尾之后先用 chat 说一句，再调用动作工具。）")
         parts.append("")
         if soft:
             parts += ["【本局临时笔记】", soft, ""]
@@ -617,7 +654,9 @@ class LLMPlayer:
         draft = self._draft_block()
         if draft:
             parts += ["", draft]
-        parts += ["先说一句话跟牌桌上说点什么（不超过 25 字，别报手牌、别报在等哪张），然后必须调用工具选一个。"]
+        parts += ["打牌时不要输出正文，只输出工具调用：正常开口用 chat 工具说一句"
+                  "（不超过 20 字，别报手牌、听牌、等哪张、牌型计划），然后调用动作工具；"
+                  "要停手就调 pause，why 写你要说的话。"]
         tips = self._tips_block()
         if tips:
             parts += ["", tips]
@@ -657,7 +696,26 @@ class LLMPlayer:
                               reasoning_budget=budget, stream=True,
                               on_delta=self._tick)
         self._note_cache("吃叉" if d.kind == "react" else "打牌", r1)
-        speech = r1.speech
+        speech = self._speech(r1)
+
+        # 先用 chat 说一句：说话不算动作，记一条回执再让它接着选动作。
+        if (r1.tool_call or {}).get("name") == "chat":
+            chat_args = r1.tool_call.get("arguments") or {}
+            call_id = f"chat_{len(self.messages)}"
+            self.messages += [
+                {"role": "assistant", "content": speech,
+                 **({"reasoning_content": r1.reasoning} if r1.reasoning else {}),
+                 "tool_calls": [{"id": call_id, "type": "function",
+                                 "function": {"name": "chat",
+                                              "arguments": json.dumps(chat_args, ensure_ascii=False)}}]},
+                {"role": "tool", "tool_call_id": call_id, "content": "已发到牌桌。"},
+            ]
+            r1 = self.client.chat(self.messages, model=self.model, tools=d.tools(),
+                                  tool_choice="required",
+                                  reasoning_budget=self.budget_tiny, stream=True,
+                                  on_delta=self._tick)
+            self._note_cache("说完接着打", r1)
+            speech = speech or self._speech(r1)
 
         # 它这一手可能只想先记一笔临时笔记：写下去，再让它接着走这一手（记笔记不算一次动作）
         if (r1.tool_call or {}).get("name") == "edit_note":
@@ -677,15 +735,15 @@ class LLMPlayer:
                                   reasoning_budget=self.budget_tiny, stream=True,
                                   on_delta=self._tick)
             self._note_cache("记完接着打", r1)
-            speech = speech or r1.speech
+            speech = speech or self._speech(r1)
 
-        # 它要中场暂停：这一手不打，把它的话原样带回牌桌，由外面接暂停流程
+        # 它要中场暂停：这一手不打；pause.why 就是它的发言，不用再调 chat。
         # 同一个回合最多喊两次，防止它一直"我再想想"把牌局拖死
         if (r1.tool_call and r1.tool_call.get("name") == "pause"
                 and self._pause_calls < 2):
             self._pause_calls += 1
             why = str((r1.tool_call.get("arguments") or {}).get("why") or "").strip()
-            said = speech or why or "（停一下）"
+            said = why or speech or "（停一下）"
             call_id = f"pause_{len(self.messages)}"
             self.messages.append({
                 "role": "assistant", "content": said,
@@ -716,11 +774,18 @@ class LLMPlayer:
                 tail = ("必须调用工具，不能只说话。从上面的合法动作里选一个，"
                         "调用对应工具；没有工具调用就不要结束这一手。")
             msgs2 = self.messages + [{"role": "user", "content": tail + " 不要说话，不要解释。"}]
-            r2 = self.client.chat(msgs2, model=self.model, tools=d.tools(),
-                                  tool_choice="required",
-                                  reasoning_budget=self.budget_tiny)
-            self._note_cache("补刀", r2)
-            action = self._action_from_call(r2.tool_call, d.legal)
+            try:
+                r2 = self.client.chat(msgs2, model=self.model, tools=d.tools(),
+                                      tool_choice="required",
+                                      reasoning_budget=self.budget_tiny,
+                                      stream=True, on_delta=self._tick)
+                self._note_cache("补刀", r2)
+                action = self._action_from_call(r2.tool_call, d.legal)
+            except Exception:
+                # 上游偶发坏包/断流：这一手按“没给出工具”处理，暂停等重来，
+                # 不能让一次 JSON 解析错误把整张牌桌打死。
+                r2 = None
+                break
             if action:
                 source = "tool2"
                 break
@@ -729,9 +794,7 @@ class LLMPlayer:
         # 逼不出工具就不落子：牌桌暂停，等它重来，绝不拿 pass 顶账。
         if action is None:
             del self.messages[base_len:]        # 这一手还没落子，连提问一起撤回，重来时别叠两条 user
-            why = "模型没调工具，牌桌先停一下。"
-            said = speech.strip()
-            return None, f"{said}（{why}）" if said else why
+            return None, speech.strip()
 
         # 复读闸：和上一手一模一样的话不再摆到牌桌上（牌桌本来就有动作记录）
         said = speech.strip()
@@ -865,15 +928,16 @@ class LLMPlayer:
         if phase == "pause":
             head = ("【中场暂停】牌先停在这儿，不急着出。随便聊，想记就记临时笔记"
                     "（edit_note 用 target=temp）；长期笔记也能追加，用 target=long，"
-                    "先记在底部草稿里，整场打完再并进长期笔记。\n")
+                    "先记在底部草稿里，本上下文窗口结束就并进长期笔记。\n")
         elif phase == "between":
             head = ("【局间闲聊】这一局打完了，下一局还没开。随便聊，可以聊刚才那手。"
-                    "现在只能追加长期笔记（target=long，mode=append），草稿整场留着，"
-                    "全部局打完才并档；要改笔记原文等最后一场打完。\n")
+                    "现在只能追加长期笔记（target=long，mode=append），草稿留到本上下文窗口结束，"
+                    "窗口重开前并档；要改笔记原文等最后一场打完。\n")
         else:
             head = ("【终场聊天】这一场到这儿了，现在是闲聊时间。就照你自己的性子说话，"
                     "可以聊刚才那几手，也可以聊别的。现在可以改长期笔记：追加或改原文都行，"
                     "改完下次开桌的顶部生效。\n")
+        head += "\n（chat 工具只在打牌时用；现在是闲聊，禁用 chat，直接回复。）\n"
         if phase == "after":
             self.finish_session()          # 整场结束才并档；本场顶部 system 仍是开局快照
         # 聊天也把这一局的临时笔记带上：局中聊完接着打，散场聊完才好把经验写进长期笔记
@@ -884,7 +948,7 @@ class LLMPlayer:
         if draft:
             head += f"\n{draft}\n"
         if phase == "between":
-            head += "\n（这一局的经验要留，就追加长期笔记：target=long；草稿整场有效，全部打完才并档。）\n"
+            head += "\n（这一局的经验要留，就追加长期笔记：target=long；草稿在本上下文窗口有效，窗口结束就并档。）\n"
         elif phase == "after":
             head += "\n（这一场的经验要留，就追加或改长期笔记：target=long；改完下次开桌顶部生效。临时笔记下一局会清空。）\n"
         # 换场景或新一局的第一句，再把当前笔记和规矩递一遍；同一场里后面的话不重复贴
@@ -898,6 +962,22 @@ class LLMPlayer:
         except Exception as e:                                  # 聊不上就算了，别把 TUI 带崩
             self.messages.pop()
             return f"（没接上话：{e}）"
+        if r.tool_call and r.tool_call.get("name") == "chat":
+            # 闲聊禁用 chat：把误调用记成被拒回执，再让它直接回答；只退一次。
+            call_id = f"chat_off_{len(self.messages)}"
+            self.messages.append({
+                "role": "assistant", "content": self._speech(r),
+                "tool_calls": [{"id": call_id, "type": "function", "function": {
+                    "name": "chat",
+                    "arguments": json.dumps(r.tool_call.get("arguments") or {}, ensure_ascii=False)}}]})
+            self.messages.append({"role": "tool", "tool_call_id": call_id,
+                                  "content": "闲聊时 chat 工具禁用；直接回答用户，不要调用工具。"})
+            try:
+                r = self._chat_call(budget)
+            except Exception as e:
+                return f"（没接上话：{e}）"
+            if r.tool_call and r.tool_call.get("name") == "chat":
+                r.tool_call = None
         if r.tool_call and r.tool_call.get("name") == "edit_note":
             # 笔记是它的，它想记就记：拦住只会让它以为引擎坏了（"你再试试"也照样被拒）。
             # 局中能动的只有临时笔记和长期笔记草稿，改原文要等整场打完，这条界线由 _apply_note 把。
@@ -915,8 +995,6 @@ class LLMPlayer:
             except Exception:
                 return f"（{done}）"
         reply = r.speech
-        if not reply and r.reasoning:
-            reply = r.reasoning.strip().splitlines()[-1]        # 话没说、只想了一通：拿最后一行顶上
         self.messages.append({"role": "assistant", "content": reply or "……",
                               "reasoning_content": r.reasoning or ""})
         return reply
@@ -930,12 +1008,13 @@ class LLMPlayer:
         self._refresh_system_prompt()
         r = self.client.chat(self.messages, model=self.model,
                              tools=TOOLS, tool_choice="auto",
-                             reasoning_budget=budget)
+                             reasoning_budget=budget,
+                             stream=True, on_delta=self._tick)
         self._note_cache("暂停" if self._phase == "pause" else "闲聊", r)
         return r
 
     def reset_temp_notes(self) -> None:
-        """新一局开始：只清临时笔记；整场草稿留着，全部打完才并档。"""
+        """新一局开始：只清临时笔记；上下文窗口草稿留着，窗口结束再并档。"""
         try:
             self.temp_notes_path.write_text("", encoding="utf-8")
         except OSError:
@@ -944,11 +1023,17 @@ class LLMPlayer:
         self._last_chat_phase = None
 
     def reset_context(self) -> None:
-        """LLM 上下文窗口结束：清对话历史，只留 system/人设。
+        """LLM 上下文窗口结束：草稿就是为前缀服务的，窗口关掉就先并档。
 
-        长期笔记、长期草稿、临时笔记都不动；下一局重新从 system 开始记。
+        并档后重新读长期笔记快照，新窗口的 system 直接带上这批经验；
+        临时笔记仍按“一局一清”，不在这里动。
         """
         self.cut_prefetch()
+        self.finish_session()
+        if self._long_draft_in_notes:
+            self._long_draft.clear()
+            self._long_draft_in_notes = False
+        self._notes_snapshot = self._read_notes()
         self.messages = [{"role": "system",
                           "content": self._system_prompt(notes=self._notes_snapshot)}]
         self._chatted = False
@@ -1002,7 +1087,7 @@ class LLMPlayer:
         self._phase = "play"
 
     def finish_session(self) -> None:
-        """整场打完：把草稿并进长期笔记文件（下次开桌的顶部才带上）。"""
+        """终场/上下文窗口结束：把草稿并进长期笔记文件（新窗口才带进 system）。"""
         self._flush_long_draft()
 
     def _load_long_draft(self) -> None:
@@ -1029,7 +1114,7 @@ class LLMPlayer:
         if self._long_draft_in_notes:
             head = "【长期笔记追加草稿（已记入长期笔记，下次开桌顶部生效）】"
         else:
-            head = "【长期笔记追加草稿（整场暂存，全部打完再并入长期笔记）】"
+            head = "【长期笔记追加草稿（本上下文窗口暂存，窗口结束即并入长期笔记）】"
         return head + "\n" + "\n".join(self._long_draft)
 
     def _flush_long_draft(self) -> None:
@@ -1078,16 +1163,16 @@ class LLMPlayer:
         new = str(args.get("new_string") or args.get("text") or "")
         if not mode:
             mode = "replace" if old else "append"
-        # 长期笔记：整场先记进底部草稿，不动顶部 system；全部局打完才直接落盘
+        # 长期笔记：本上下文窗口先记到底部草稿，不动顶部 system；窗口结束才并档
         if not target:
             target = "temp" if self._phase != "after" else "long"
         if target == "long" and self._phase != "after":
             if mode != "append":
-                return "局中只能在草稿里追加长期笔记（mode=append），改原文等全部局打完再动"
+                return "局中只能在草稿里追加长期笔记（mode=append），改原文等本上下文窗口结束再动"
             if not new.strip():
                 return "没写内容，草稿没动"
             self._add_long_draft(new)
-            return "长期笔记追加草稿记在牌桌底部了，整场打完再并进长期笔记。现在是：\n" + "\n".join(self._long_draft)
+            return "长期笔记追加草稿记在牌桌底部了，本上下文窗口结束就并进长期笔记。现在是：\n" + "\n".join(self._long_draft)
         if target == "long":
             # 散场：直接改长期笔记文件；追加的同时留在草稿块里给它看一眼
             try:
@@ -1112,6 +1197,10 @@ class LLMPlayer:
                         return f"这段在笔记里出现 {n} 次，不唯一，没动（要全改就用 replace_all）"
                     body = body.replace(old, new) if mode == "replace_all" else body.replace(old, new, 1)
                     self.notes_path.write_text(body[:4000].rstrip() + "\n", encoding="utf-8")
+                    # 原文已经按“after”权限改完，草稿只是过程稿，不再并一遍
+                    self._long_draft.clear()
+                    self._long_draft_in_notes = False
+                    self._save_long_draft()
                 else:
                     return f"不认识的做法 {mode}"
                 return "长期笔记改好了（下次开桌顶部生效）。现在是：\n" + body[-1200:]
@@ -1261,16 +1350,35 @@ class LLMPlayer:
         if thread is not None and thread.is_alive():
             thread.join(timeout=3.0)     # 等它把 _prefetching 放掉，别和出牌那次请求叠在一起
 
-    # ---- 缓存命中 ----
+    # ---- 缓存命中 / 输出速度 ----
     def _note_cache(self, label: str, r: ChatResult) -> None:
-        row = {"label": label, "prompt": r.prompt_tokens, "cached": r.cached_tokens}
+        row = {
+            "label": label,
+            "prompt": r.prompt_tokens,
+            "cached": r.cached_tokens,
+            "hit_rate": round(r.hit_rate, 3),
+            "tokens": int(r.tokens or 0),
+            "seconds": round(float(r.seconds or 0), 2),
+            "decode_seconds": round(float(r.decode_seconds or 0), 2),
+            "speed": round(r.output_speed, 1),
+        }
         self.cache_stats.append(row)
         if self.debug_cache and r.prompt_tokens:
             flag = ""
             if r.cached_tokens == 0 and r.prompt_tokens > 200:
                 flag = "   ← 一个都没复用：前缀被改了？"
             print(f"  缓存 {label} 复用 {r.cached_tokens} 新读 {r.read_tokens}"
-                  f"（prompt {r.prompt_tokens}）{flag}", flush=True)
+                  f"（prompt {r.prompt_tokens}，命中 {r.hit_rate:.1%}）"
+                  f"，输出 {r.tokens} tok @ {r.output_speed:.1f} tok/s{flag}", flush=True)
+
+    def latest_stats(self) -> dict | None:
+        """最近一次请求的命中率/速度；网页只显示这一格，不显示总账。"""
+        if not self.cache_stats:
+            return None
+        row = dict(self.cache_stats[-1])
+        if len(self.cache_stats) > 1:
+            row["previous_hit_rate"] = self.cache_stats[-2].get("hit_rate")
+        return row
 
     def cache_report(self) -> str:
         """看总账：复用了多少、真正重读了多少。前缀干净的话，新读只该是这一手的增量。"""
@@ -1400,10 +1508,32 @@ def _selftest() -> int:
     p = LLMPlayer(fc, 0, log_path=None)
     act, speech = p.decide(d)
     case("工具调用直接命中", (act.kind, tile_id(act.tile)), ("discard", pid))
-    case("说话被保留", speech, f"我打 {pid}。")
+    case("正文不上桌", speech, "")
     case("第一遍就是强制调用 + 带了思考预算", (fc.calls[0]["tool_choice"], fc.calls[0]["reasoning_budget"]), ("required", 3000))
     case("打牌不再由代码传 max_tokens", "max_tokens" in fc.calls[0], False)
     case("用的是 lowthink", fc.calls[0]["model"], "strata-lowthink")
+    case("chat 常驻工具表", any(t["function"]["name"] == "chat" for t in fc.calls[0]["tools"]), True)
+
+    # 1a 打牌先用 chat 说一句，再出牌
+    fcChat = _FakeClient([
+        ChatResult(tool_call={"name": "chat", "arguments": {"text": "这张我先走"}}),
+        ChatResult(tool_call={"name": "discard", "arguments": {"tile": pid}}),
+    ])
+    pChat = LLMPlayer(fcChat, 0, log_path=None)
+    actChat, sayChat = pChat.decide(d)
+    case("chat 说完再出牌", (actChat.kind, tile_id(actChat.tile)), ("discard", pid))
+    case("chat 的话带上桌", sayChat, "这张我先走")
+    case("chat 有回执", any(m.get("content") == "已发到牌桌。" for m in pChat.messages), True)
+    case("chat 后仍用同一张工具表", fcChat.calls[1]["tools"] == TOOLS, True)
+
+    # 1b 闲聊误调 chat：拒一次，仍直接回答
+    fcOff = _FakeClient([
+        ChatResult(tool_call={"name": "chat", "arguments": {"text": "打牌时说的话"}}),
+        ChatResult(content="闲聊就该直接说。"),
+    ])
+    pOff = LLMPlayer(fcOff, 0, log_path=None)
+    case("闲聊禁用 chat，仍能回话", pOff.chat("聊会儿"), "闲聊就该直接说。")
+    case("闲聊和打牌共用一张工具表", fcOff.calls[0]["tools"] == TOOLS, True)
 
     # 1b 吃叉只给 1000
     t0id = d.view["hand"][0]
@@ -1452,7 +1582,7 @@ def _selftest() -> int:
     case("两遍没工具不落子", act, None)
     case("两遍没工具不写回合记录", len(p.records), 0)
     case("两遍没工具把这一手的提问撤回", p.messages, before)
-    case("两遍没工具明说牌桌停", "模型没调工具" in say, True)
+    case("两遍没工具也不拿正文上桌", say, "")
 
     # 4 它说了手里没有的牌 → 也不替它兜底
     fc = _FakeClient([ChatResult(content=f"我要打 {notin}。"), ChatResult(content="")])
@@ -1543,6 +1673,14 @@ def _selftest() -> int:
                      legal=[Action("discard", tile=parse_tile(notin)),
                             Action("discard", tile=parse_tile(pid))])
     case("报听之后打牌只给最低预算", p2._budget_for(tired), 200)
+
+    one = Decision(seat=0, kind="discard", view=tinged,
+                   legal=[Action("discard", tile=parse_tile(notin))])
+    fcS = _FakeClient([ChatResult(tool_call={"name": "chat",
+                                             "arguments": {"text": "这张我打回"}})])
+    pS = LLMPlayer(fcS, 0, log_path=None)
+    actS, sayS = pS.decide(one)
+    case("锁死那手也只认 chat", (actS.kind, sayS), ("discard", "这张我打回"))
     kanning = Decision(seat=0, kind="discard", view=tinged,
                        legal=[Action("kan", tile=parse_tile(notin)), Action("discard", tile=parse_tile(notin))])
     case("报听之后能杠，预算给满", p2._budget_for(kanning), 3000)
@@ -1556,7 +1694,7 @@ def _selftest() -> int:
     case("打牌和吃叉用的是同一张工具表", shape(d) == shape(pon_only), True)
     case("能胡和不能胡也是同一张", shape(win_only) == shape(d), True)
     case("工具表带齐整套动作", [t["function"]["name"] for t in d.tools()],
-         ["discard", "pon", "kan", "chi", "win", "bloom", "pass", "ting", "edit_note", "pause"])
+         ["discard", "pon", "kan", "chi", "win", "bloom", "pass", "ting", "edit_note", "pause", "chat"])
     case("打牌那几件 schema 里不塞牌名",
          any("enum" in json.dumps(t) for t in d.tools()[:6]), False)
 
@@ -1566,7 +1704,8 @@ def _selftest() -> int:
     pC = LLMPlayer(fcC, 0, log_path=None)
     reply1 = pC.chat("我刚才打得怎么样")
     case("第一句带开场说明", "【终场聊天】" in fcC.calls[0]["messages"][-1]["content"], True)
-    case("闲聊也带整张工具表", len(fcC.calls[0]["tools"]), 10)
+    case("闲聊也带整张工具表", len(fcC.calls[0]["tools"]), 11)
+    case("闲聊提示禁用 chat", "禁用 chat" in fcC.calls[0]["messages"][-1]["content"], True)
     case("闲聊不强制调用", fcC.calls[0]["tool_choice"], "auto")
     case("它说什么就显示什么", reply1, "你那张 s1 打早了。")
     case("一问一答都进历史", (pC.messages[-2]["role"], pC.messages[-1]["role"]), ("user", "assistant"))
@@ -1612,12 +1751,14 @@ def _selftest() -> int:
     case("没人提笔记时它想记也照记", "没人提也照记" in note.read_text(encoding="utf-8"), True)
     case("回执不再是那句挡人的话",
          any("没人让你动笔记" in m["content"] for m in pN2.messages), False)
-    case("整局就这一张工具表", len(TOOLS), 10)
+    case("整局就这一张工具表", len(TOOLS), 11)
 
     # 5f 随时能暂停、随时能记条临时笔记：这三处都得把它告诉到位
     case("出牌那手也告诉它能暂停", "pause" in p2._user_prompt(d, 3000), True)
+    case("出牌那手也告诉它用 chat", "用 chat" in p2._user_prompt(d, 3000), True)
+    case("打牌提示不插闲聊规则", "闲聊" in p2._user_prompt(d, 3000), False)
     case("出牌那手也告诉它能记临时笔记", "edit_note" in p2._user_prompt(d, 3000), True)
-    case("报听锁死那手不吹这两件", _ALWAYS in p2._actions_text(tired.legal, always=False), False)
+    case("报听锁死那手不吹这三件", _ALWAYS in p2._actions_text(tired.legal, always=False), False)
 
     soft = Path(tempfile.gettempdir()) / "_mahjong_soft.md"
     soft.write_text("", encoding="utf-8")
@@ -1640,7 +1781,7 @@ def _selftest() -> int:
     pP = LLMPlayer(fcP, 0, log_path=None)
     actP, sayP = pP.decide(d)
     case("暂停时不出牌", actP, None)
-    case("它说的话带回来", sayP, "等一下，我想问一句。")
+    case("暂停 why 直接带出来", sayP, "问他为什么打 m9")
     case("暂停也落进历史", pP.messages[-1]["role"], "tool")
 
     # 5j 局中只许记临时笔记，长期笔记要等打完
@@ -1698,7 +1839,7 @@ def _selftest() -> int:
     case("并完草稿标已记入", "已记入长期笔记" in pL._draft_block(), True)
     case("并完草稿文件清掉", draftL.exists(), False)
 
-    # 换局只清临时笔记，草稿整场留着；两者都要能恢复
+    # 换局只清临时笔记，草稿留到上下文窗口结束；两者都要能恢复
     noteP = Path(tempfile.gettempdir()) / "_mahjong_note_p.md"
     noteP.write_text("", encoding="utf-8")
     tempP = Path(tempfile.gettempdir()) / "_mahjong_temp_p.md"
@@ -1715,8 +1856,12 @@ def _selftest() -> int:
     pP2.reset_temp_notes()
     case("换局草稿不并档", "整场攒的草稿" in pP2._draft_block(), True)
     case("换局临时笔记清空", tempP.read_text(encoding="utf-8").strip(), "")
+    pP2.reset_context()
+    case("上下文窗口结束并档", "整场攒的草稿" in noteP.read_text(encoding="utf-8"), True)
+    case("并档后草稿清空", pP2._draft_block(), "")
+    case("新窗口 system 带上并档", "整场攒的草稿" in pP2._notes_snapshot, True)
     pP2.finish_session()
-    case("整场打完才并档", "整场攒的草稿" in noteP.read_text(encoding="utf-8"), True)
+    case("终场并档不重复", noteP.read_text(encoding="utf-8").count("整场攒的草稿"), 1)
 
     # 5f 没让它改也可以自己记：以前按字眼卡，硬试两次都被挡，它会以为引擎坏了
     note2 = Path(tempfile.gettempdir()) / "_mahjong_note2.md"
@@ -1752,6 +1897,17 @@ def _selftest() -> int:
     pE.chat("把笔记里幺九那条改一下")
     case("定点改到了", "幺九优先留，带搭子更金贵" in note4.read_text(encoding="utf-8"), True)
     case("旁的行没被碰", note4.read_text(encoding="utf-8").splitlines()[0], "- 起手先数对子")
+
+    # 5h-b after 权限下直接改原文，草稿已经完成使命，窗口结束不能再并一遍
+    note4b = Path(tempfile.gettempdir()) / "_mahjong_note4b.md"
+    note4b.write_text("- 旧的一条\n", encoding="utf-8")
+    pR = LLMPlayer(_FakeClient([ChatResult(content="好")]), 0, log_path=None, notes_path=note4b)
+    pR._add_long_draft("- 草稿里的一条")
+    pR.set_phase("after")
+    pR._apply_note({"target": "long", "mode": "replace",
+                    "old_string": "旧的一条", "new_string": "新的一条"})
+    case("after 能直接改长期笔记", "新的一条" in note4b.read_text(encoding="utf-8"), True)
+    case("改完草稿不再重复并", pR._draft_block(), "")
 
     note5 = Path(tempfile.gettempdir()) / "_mahjong_note5.md"
     note5.write_text("- 只有一条\n", encoding="utf-8")
@@ -1856,6 +2012,8 @@ def _selftest() -> int:
 
     # 11 缓存命中率：正常该接近 100%，低了就是前缀被动过
     case("命中率算得对", ChatResult(prompt_tokens=1000, cached_tokens=990).hit_rate, 0.99)
+    case("输出速度按解码时间算",
+         ChatResult(tokens=200, seconds=10, decode_seconds=2).output_speed, 100.0)
     case("Strata 的 usage 能解析",
          _usage_of({"prompt_tokens": 1200, "prompt_tokens_details": {"cached_tokens": 1180}}), (1200, 1180))
     fc9 = _FakeClient([ChatResult(prompt_tokens=900, cached_tokens=890,
@@ -1865,6 +2023,14 @@ def _selftest() -> int:
     case("请求记进了缓存表", p9.cache_stats[0]["label"], "打牌")
     case("报表给出总账", "复用 890，新读 10" in p9.cache_report(), True)
     case("没复用才点名", "一次没复用" in p9.cache_report(), False)
+
+    fc10 = _FakeClient([ChatResult(prompt_tokens=900, cached_tokens=890, tokens=150,
+                                   seconds=3, decode_seconds=2,
+                                   tool_call={"name": "discard", "arguments": {"tile": pid}})])
+    p10 = LLMPlayer(fc10, 0, log_path=None)
+    p10.decide(d)
+    case("缓存表记了本次速度", p10.cache_stats[0]["speed"], 75.0)
+    case("只取最近一次命中率", p10.latest_stats()["hit_rate"], 0.989)
 
     print()
     print(f"共 {fails} 条失败")

@@ -687,7 +687,8 @@ class TableCore:
                     if self.llm and d.seat == self.llm.seat and self.llm.impl.cache_stats:
                         st = self.llm.impl.cache_stats[-1]
                         row.update(prompt=st["prompt"], cached=st["cached"],
-                                   read=max(0, st["prompt"] - st["cached"]))
+                                   read=max(0, st["prompt"] - st["cached"]),
+                                   tokens=st.get("tokens", 0), speed=st.get("speed", 0))
                     Tracer(self.cfg.trace_path).log(**row)
                 except Exception:
                     pass
@@ -749,6 +750,16 @@ class TableCore:
             self._broadcast = make_broadcast(
                 self.round, res, self.board, self.me, self._ended_early)
             self._chat_broadcast_seats.clear()
+            # 上下文窗口在本局走满：局间就从 LLM 视角按“after”处理，
+            # 允许它改长期笔记；下一局开始才真正清 messages。
+            if self.context_round >= self.rounds:
+                self._context_cut_next = True
+                if self.table:
+                    for p in self.table.of_kind("llm"):
+                        try:
+                            p.impl.set_phase("after")
+                        except Exception:
+                            pass
             # rounds 现在是 LLM 上下文窗口，不再决定整场打几局。只有用户主动
             # 停止/步数上限才收场；普通一局结束都停下来等“下一局”。
             last = self._ended_early or self._stopped_by_limit
@@ -844,7 +855,7 @@ class TableCore:
         self._safe_persist_locked()
 
     def _reset_llm_contexts(self) -> None:
-        """清空每个 LLM 的对话上下文，只留 system/人设；笔记文件和草稿不动。"""
+        """清空每个 LLM 的对话上下文，只留 system/人设；草稿在这里并档。"""
         if not self.table:
             return
         for p in self.table.of_kind("llm"):
@@ -1157,6 +1168,7 @@ class TableCore:
             seats = []
             for no in range(1, int(view.get("seats") or 4) + 1):
                 idx = no - 1
+                player = self.table.at(idx) if self.table else None
                 seat_melds = []
                 for m in (_at(melds, idx, []) or []):
                     if isinstance(m, dict):
@@ -1172,7 +1184,7 @@ class TableCore:
                 seats.append({
                     "no": no,
                     "name": self.names.get(idx, f"{no}号"),
-                    "kind": (self.table.at(idx).kind if self.table else "random"),
+                    "kind": (player.kind if player else "random"),
                     "is_me": no == own,
                     "hand_count": int(_at(hand_sizes, idx, 0) or 0),
                     "hand": other_hand if debug or no == own else None,
@@ -1185,6 +1197,8 @@ class TableCore:
                     "kans": int(_at(kans, idx, 0) or 0),
                     "dead": bool(_at(dead, idx, False)),
                     "dealer": dealer is not None and int(dealer) == idx,
+                    "llm": (player.impl.latest_stats()
+                            if player and player.kind == "llm" else None),
                 })
 
             legal = d.legal if (d and d.seat == own_idx) else []

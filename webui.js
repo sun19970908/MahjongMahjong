@@ -93,6 +93,27 @@
     return s ? s.name + (s.wind ? "·" + s.wind : "") : `${no}号`;
   }
 
+  function llmLive(seat) {
+    if (!seat || !seat.llm) return null;
+    const stats = seat.llm;
+    const wrap = document.createElement("span");
+    wrap.className = "llm-live";
+    const hitRate = Number(stats.hit_rate || 0);
+    const prevRate = stats.previous_hit_rate;
+    wrap.title = prevRate == null
+      ? "本次请求；缓存命中率按与上一次请求体的复用计算"
+      : `本次请求；缓存命中率按与上一次请求体的复用计算（上次 ${(Number(prevRate) * 100).toFixed(1)}%）`;
+    const hit = document.createElement("span");
+    hit.className = "hit";
+    hit.textContent = `缓存 ${stats.prompt ? (hitRate * 100).toFixed(1) + "%" : "—"}`;
+    const speed = document.createElement("span");
+    speed.className = "speed";
+    const rate = Number(stats.speed || 0);
+    speed.textContent = `输出 ${rate ? rate.toFixed(1) + " tok/s" : "—"}`;
+    wrap.append(hit, speed);
+    return wrap;
+  }
+
   function renderSeat(seat, slotName) {
     const host = $("slot-" + slotName);
     if (!host) return;
@@ -105,6 +126,8 @@
     who.className = "who";
     who.textContent = seat.name + (seat.wind ? " · " + seat.wind : "");
     head.appendChild(who);
+    const live = llmLive(seat);
+    if (live) head.appendChild(live);
     if (state.turn === seat.no && !state.result && !state.finished) {
       const turn = document.createElement("span");
       turn.className = "turn";
