@@ -172,7 +172,7 @@ def build_manifest(state_path: Path | str, name: str | None = None) -> dict:
     expected = current_round if ended else max(0, current_round - 1)
     missing = [r for r in range(1, expected + 1)
                if r not in {int(x.get("round") or 0) for x in rounds}]
-    last = (rounds[-1].get("result") if rounds and rounds[-1].get("round") == current_round
+    last = (rounds[-1].get("result") if rounds
             else _result_summary(game.get("result")))
     last = _normalise_result(last)
     run_id = str(meta.get("snapshot_run") or "")
