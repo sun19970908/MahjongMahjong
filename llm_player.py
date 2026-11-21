@@ -112,6 +112,10 @@ def _tool_calls_of(raw_calls: list[dict]) -> list[dict]:
     for i, c in enumerate(raw_calls):
         name = str(c.get("name") or "")
         raw = str(c.get("arguments") or "{}")
+        if not name:
+            name = _scan_tool_name(raw)
+        if not name and not raw.strip("{} \t\r\n"):
+            continue
         try:
             args = json.loads(raw or "{}")
             ok = isinstance(args, dict)
@@ -120,15 +124,115 @@ def _tool_calls_of(raw_calls: list[dict]) -> list[dict]:
             ok = False
         if not ok:
             args = {}
+        args, lenient = _recover_tool_args(name, raw, args)
         out.append({
             "id": str(c.get("id") or ""),
             "name": name,
             "arguments": args,
             "raw_arguments": raw,
             "parse_ok": ok,
+            "lenient": lenient,
             "index": int(c.get("index", i)),
         })
     return out
+
+
+_TILE_SCAN_RE = re.compile(r"(?<![A-Za-z0-9])([mpsz])([1-9])(?![0-9])")
+_COMBO_SCAN_RE = re.compile(
+    r"(?<![A-Za-z0-9])([mps])([1-9])\s*\+\s*([mps])([1-9])(?![0-9])")
+_TOOL_NAME_RE = re.compile(
+    r'(?:\bname\s*["\']?\s*[:=]\s*["\']?|<invoke\s+name\s*=\s*["\'])([a-z_]+)')
+
+
+def _scan_tool_name(text: str) -> str:
+    for name in _TOOL_NAME_RE.findall(text or ""):
+        if name in _ACTION_NAMES or name in ("chat", "edit_note", "pause"):
+            return name
+    return ""
+
+
+def _scan_tiles(text: str) -> list[str]:
+    out: list[str] = []
+    for suit, rank in _TILE_SCAN_RE.findall(text or ""):
+        tile = f"{suit}{rank}"
+        try:
+            parse_tile(tile)
+        except ValueError:
+            continue
+        out.append(tile)
+    return out
+
+
+def _scan_combos(text: str) -> list[str]:
+    out: list[str] = []
+    for a_suit, a_rank, b_suit, b_rank in _COMBO_SCAN_RE.findall(text or ""):
+        a, b = f"{a_suit}{a_rank}", f"{b_suit}{b_rank}"
+        try:
+            parse_tile(a)
+            parse_tile(b)
+        except ValueError:
+            continue
+        out.append(a + "+" + b)
+    return out
+
+
+def _recover_tool_args(name: str, raw: str, args: dict) -> tuple[dict, bool]:
+    """参数坏掉时，从原始串里把唯一的牌/搭子捞回来；捞到了就算宽容解析。"""
+    original = dict(args) if isinstance(args, dict) else {}
+    texts = [raw]
+    nested = original.get("arguments")
+    if isinstance(nested, dict):
+        args = dict(nested)
+        return args, True
+    if isinstance(nested, str):
+        texts.append(nested)
+        try:
+            parsed = json.loads(nested)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            args = parsed
+            return args, True
+
+    blob = " ".join(texts)
+    if name in ("discard", "pon", "kan"):
+        tile = args.get("tile") if isinstance(args, dict) else None
+        if tile:
+            try:
+                parse_tile(tile)
+                return args, False
+            except ValueError:
+                pass
+        tiles = _scan_tiles(blob)
+        if tiles:
+            return {"tile": tiles[-1]}, True
+    elif name == "chi":
+        combo = args.get("combo") if isinstance(args, dict) else None
+        if combo:
+            try:
+                parts = [parse_tile(x) for x in str(combo).split("+") if x]
+                if len(parts) == 2:
+                    return args, False
+            except ValueError:
+                pass
+        combos = _scan_combos(blob)
+        if combos:
+            return {"combo": combos[-1]}, True
+    elif name == "chat":
+        text = args.get("text") if isinstance(args, dict) else None
+        if text:
+            return args, False
+        match = re.search(r'"text"\s*:\s*"([^"]*)"', blob)
+        if match:
+            return {"text": match.group(1)}, True
+    elif name == "pause":
+        why = args.get("why") if isinstance(args, dict) else None
+        if why:
+            return args, False
+        match = re.search(r'"why"\s*:\s*"([^"]*)"', blob)
+        if match:
+            return {"why": match.group(1)}, True
+    return args, False
 
 
 class StrataClient:
@@ -262,7 +366,7 @@ class StrataClient:
             end_at = time.monotonic()
             tc_list = _tool_calls_of([
                 {"id": slot["id"], "name": slot["name"], "arguments": slot["arguments"], "index": idx}
-                for idx, slot in calls.items() if slot["name"]
+                for idx, slot in calls.items() if slot["name"] or slot["arguments"]
             ])
             return ChatResult(content="".join(content), reasoning="".join(reasoning),
                               tool_call=tc_list[0] if tc_list else None,
@@ -605,7 +709,9 @@ class LLMPlayer:
         texts = []
         for tc in r.calls:
             if tc.get("name") == "chat":
-                text = (tc.get("arguments") or {}).get("text") if isinstance(tc.get("arguments"), dict) else ""
+                args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else {}
+                args, _ = _recover_tool_args("chat", str(tc.get("raw_arguments") or ""), args)
+                text = args.get("text") if isinstance(args, dict) else ""
                 if text:
                     texts.append(str(text))
         return self._short_say(" ".join(texts)) if texts else ""
@@ -954,20 +1060,23 @@ class LLMPlayer:
     def _action_from_call(self, tc: dict | None, legal: Sequence[Action]) -> Action | None:
         if not tc:
             return None
-        name, args = tc.get("name"), tc.get("arguments") or {}
-        if not isinstance(args, dict):
-            return None
+        name = str(tc.get("name") or "")
+        raw = str(tc.get("raw_arguments") or "")
+        args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else {}
+        if not name:
+            name = _scan_tool_name(raw)
+        args, _ = _recover_tool_args(name, raw, args)
         # 吃只认那两张手牌：被吃的那张由牌桌定，工具里根本没有这个字段
         if name == "chi":
             combo = tuple(sorted(parse_tile(x) for x in str(args.get("combo", "")).split("+") if x))
             for cand in legal:
                 if cand.kind == "chi" and tuple(sorted(cand.combo)) == combo:
                     return cand
-            return None
+            return self._lenient_action(name, raw, legal)
         try:
             a = self._parse_call(name, args)
         except Exception:
-            return None
+            return self._lenient_action(name, raw, legal)
         for cand in legal:
             if cand.kind != a.kind:
                 continue
@@ -977,7 +1086,36 @@ class LLMPlayer:
                 return cand
             if cand.tile == a.tile and tuple(cand.combo) == tuple(a.combo):
                 return cand
-        return None
+        return self._lenient_action(name, raw, legal)
+
+    def _lenient_action(self, name: str, raw: str, legal: Sequence[Action]) -> Action | None:
+        """名字对、原始串里能搜到合法参数时，按牌桌上的合法动作认一个。"""
+        blob = raw
+        if name == "chi":
+            for combo_text in reversed(_scan_combos(blob)):
+                combo = tuple(sorted(parse_tile(x) for x in combo_text.split("+")))
+                for cand in legal:
+                    if cand.kind == "chi" and tuple(sorted(cand.combo)) == combo:
+                        return cand
+            return None
+        if name in ("win", "pass", "ting", "bloom", "draw"):
+            for cand in legal:
+                if cand.kind == name:
+                    return cand
+            return None
+        if name not in ("discard", "pon", "kan"):
+            return None
+        tiles = _scan_tiles(blob)
+        best = None
+        best_pos = -1
+        for cand in legal:
+            if cand.kind != name or cand.tile is None:
+                continue
+            tid = tile_id(cand.tile)
+            pos = blob.rfind(tid)
+            if tid in tiles and pos > best_pos:
+                best, best_pos = cand, pos
+        return best
 
     def _parse_call(self, name: str | None, args: dict) -> Action:
         if name in ("discard", "pon", "kan"):
@@ -1656,6 +1794,14 @@ def _selftest() -> int:
          _tool_calls_of([{"name": "discard", "arguments": bad_args}])[0]["parse_ok"], False)
     case("好参数解析标记为成功",
          _tool_calls_of([{"name": "discard", "arguments": '{"tile":"s1"}'}])[0]["parse_ok"], True)
+    case("坏串里能搜到牌",
+         _tool_calls_of([{"name": "discard", "arguments": bad_args}])[0]["arguments"],
+         {"tile": "s1"})
+    nested_args = json.dumps({"arguments": json.dumps({"tile": "s6"}, ensure_ascii=False)},
+                             ensure_ascii=False)
+    case("套一层的 arguments 能拆开",
+         _tool_calls_of([{"name": "pon", "arguments": nested_args}])[0]["arguments"],
+         {"tile": "s6"})
     fcBad = _FakeClient([
         ChatResult(tool_calls=[{"id": "bad1", "name": "discard", "arguments": {},
                                 "raw_arguments": bad_args, "parse_ok": False}]),
@@ -1671,6 +1817,17 @@ def _selftest() -> int:
     case("tool 回执只报失败原因",
          fcBad.calls[1]["messages"][-1]["content"], "你没有调用工具，或工具格式错误。")
     case("坏调用没有多插 user", fcBad.calls[1]["messages"][-1]["role"], "tool")
+
+    # 1a3b 牌名/参数能从坏串里搜出来：直接落子，不再补刀
+    lenient_react = Decision(seat=1, kind="react", view=d.view,
+                             legal=[Action("pass"), Action("pon", tile=parse_tile(pid)), Action("win")])
+    lenient_raw = f'{{"tile"> {pid} </|DSML|: "{pid}"}}'
+    fcLen = _FakeClient([ChatResult(tool_call={
+        "name": "pon", "arguments": {}, "raw_arguments": lenient_raw})])
+    pLen = LLMPlayer(fcLen, 1, log_path=None)
+    actLen, _ = pLen.decide(lenient_react)
+    case("坏参数里搜到合法 pon", (actLen.kind, tile_id(actLen.tile)), ("pon", pid))
+    case("宽容解析后不补刀", len(fcLen.calls), 1)
 
     # 1a4 一轮回了两个打牌工具：算格式错误，两个都回执，不落子
     fcMulti = _FakeClient([
