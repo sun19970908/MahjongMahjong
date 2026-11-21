@@ -45,7 +45,8 @@ _FILLERS = frozenset({"（闲下来想这手牌，还没想完）", "（闲下�
 
 # 任何时候都能喊的三件事（不算这一手）：聊天、说两句停一下、记条笔记。
 # chat 常驻工具表是为了前缀缓存；闲聊禁用靠提示词和调用校验，不靠删 schema。
-_ALWAYS = ("；另外这三件随手就能喊：chat（打牌时只走工具，用它说一句，不超过20字，别报手牌/听牌/计划）、"
+_ALWAYS = ("；另外这三件随手就能喊：chat（要开口时单独一轮调用，说完收到回执再出牌，不超过20字，"
+           "别报手牌/听牌/计划）、"
            "pause（这手先不打，why 直接说，不用再调 chat）、"
            "edit_note（临时笔记 target=temp；长期笔记局中只能 target=long 追加草稿，记完接着打这一手）")
 
@@ -649,7 +650,8 @@ class LLMPlayer:
         soft = self._read_soft_notes()
         parts = [self._headline(d)]
         if getattr(self.client, "send_reasoning_budget", True):
-            parts.append(f"（思考预算 {budget} token，到点引擎会强制收尾；收尾之后先用 chat 说一句，再调用动作工具。）")
+            parts.append(f"（思考预算 {budget} token，到点引擎会强制收尾；收尾之后这一轮只调用 chat 说一句，"
+                         "收到回执后，下一轮再调用动作工具。）")
         parts.append("")
         if soft:
             parts += ["【本局临时笔记】", soft, ""]
@@ -660,7 +662,7 @@ class LLMPlayer:
             # 工具表是固定的一整张（顶部，永不改动）；这一手到底能做哪几个，只写在这里。
             # 这一行每手都变，但它本来就在最尾巴上，前面几万 token 照样复用。
             f"【本轮只能做这些】{self._actions_text(d.legal)}",
-            "只能从上表里挑一个，调表外的动作会被判无效。",
+            "一轮只调一个工具，只能从上表里挑一个，调表外的动作会被判无效。",
         ]
         hints = self._ting_hints(d)
         if hints:
@@ -668,8 +670,10 @@ class LLMPlayer:
         draft = self._draft_block()
         if draft:
             parts += ["", draft]
-        parts += ["打牌时不要输出正文，只输出工具调用：正常开口用 chat 工具说一句"
-                  "（不超过 20 字，别报手牌、听牌、等哪张、牌型计划），然后调用动作工具；"
+        parts += ["打牌时不要输出正文，只输出工具调用，并且一轮只调一个工具。"
+                  "要开口时，这一轮只调用 chat 说一句（不超过 20 字，别报手牌、听牌、等哪张、牌型计划）；"
+                  "收到系统回执后，下一轮再调用动作工具。"
+                  "不要把 chat 的文字塞进动作参数，也不要同一轮同时调用 chat 和动作工具。"
                   "要停手就调 pause，why 写你要说的话。"]
         tips = self._tips_block()
         if tips:
@@ -1773,7 +1777,8 @@ def _selftest() -> int:
 
     # 5f 随时能暂停、随时能记条临时笔记：这三处都得把它告诉到位
     case("出牌那手也告诉它能暂停", "pause" in p2._user_prompt(d, 3000), True)
-    case("出牌那手也告诉它用 chat", "用 chat" in p2._user_prompt(d, 3000), True)
+    case("出牌那手一轮只调一个工具", "一轮只调一个工具" in p2._user_prompt(d, 3000), True)
+    case("chat 要先单独一轮", "这一轮只调用 chat" in p2._user_prompt(d, 3000), True)
     case("打牌提示不插闲聊规则", "闲聊" in p2._user_prompt(d, 3000), False)
     case("出牌那手也告诉它能记临时笔记", "edit_note" in p2._user_prompt(d, 3000), True)
     case("报听锁死那手不吹这三件", _ALWAYS in p2._actions_text(tired.legal, always=False), False)
