@@ -246,6 +246,14 @@
       log.replaceChildren();
       return;
     }
+    if (state.interrupted) {
+      main.textContent = "牌桌出错";
+      sub.textContent = `${state.error || "外部请求失败"} · 点“继续”重试`;
+      wall.replaceChildren();
+      last.replaceChildren();
+      log.replaceChildren();
+      return;
+    }
 
     const phase = state.phase_label || "?";
     let title = "等牌局";
@@ -651,7 +659,9 @@
     dot.className = "dot";
     status.appendChild(dot);
     const text = document.createElement("span");
-    if (state.finished) {
+    if (state.interrupted) {
+      text.textContent = `牌桌出错${state.error ? " · " + state.error : ""} · 点“继续”重试`;
+    } else if (state.finished) {
       text.textContent = state.result
         ? "本局结束 · 可继续下一局"
         : `这一场结束${state.error ? " · " + state.error : ""}`;
@@ -680,12 +690,22 @@
     debugBtn.title = state.debug ? "切换四家手牌可见" : "启动 webui.py 时加 --debug 才能查看";
 
     $("btn-resume").disabled = !!state.running && !state.finished;
+    $("btn-resume").textContent = state.interrupted ? "继续" : "接着打";
+    $("btn-continue").classList.toggle("hidden", !state.interrupted);
     $("btn-quit").disabled = !state.running && state.finished !== true;
     $("btn-settings").disabled = false;
 
     renderScorebar();
     renderSpeechBar();
     if (!state.ok) {
+      renderCenter();
+      $("my-hand").replaceChildren();
+      $("my-melds").replaceChildren();
+      renderActions();
+      renderChat();
+      return;
+    }
+    if (state.interrupted) {
       renderCenter();
       $("my-hand").replaceChildren();
       $("my-melds").replaceChildren();
@@ -840,9 +860,11 @@
   }
 
   async function resumeGame() {
+    const wasInterrupted = !!(state && state.interrupted);
     resetTableState();
     const data = await post("/api/resume", {});
-    if (data && data.ok) toast("接上存档了。");
+    if (data && data.ok) toast(wasInterrupted ? "继续了。" : "接上存档了。");
+    else if (data && data.message) toast(data.message);
   }
 
   async function quitGame() {
@@ -955,6 +977,7 @@
   $("btn-context").addEventListener("click", openContextSettings);
   $("btn-settings").addEventListener("click", openSettings);
   $("btn-resume").addEventListener("click", resumeGame);
+  $("btn-continue").addEventListener("click", resumeGame);
   $("btn-quit").addEventListener("click", quitGame);
   $("btn-chat-toggle").addEventListener("click", () => {
     chatCollapsed = !chatCollapsed;

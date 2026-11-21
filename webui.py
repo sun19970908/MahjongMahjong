@@ -272,6 +272,15 @@ class WebTable:
         with self.lock:
             return self.core.resume_after_pause() if self.core else {"ok": False}
 
+    def resume(self) -> dict:
+        """外部错误打断时原地续跑；否则仍按旧逻辑从存档接一桌。"""
+        with self.lock:
+            c = self.core
+            if c is not None and c.status().get("interrupted"):
+                self.error = ""
+                return c.resume_after_error()
+        return self.start(resume=True)
+
     def next_round(self) -> dict:
         with self.lock:
             return self.core.next_round_request() if self.core else {"ok": False}
@@ -387,7 +396,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, **self.table.start(resume=False, overrides=body)})
             return
         if path == "/api/resume":
-            self._json({"ok": True, **self.table.start(resume=True, overrides=body)})
+            self._json({"ok": True, **self.table.resume()})
             return
         if path == "/api/rollback":
             self._json(self.table.rollback(str(body.get("name") or body.get("step") or "")))

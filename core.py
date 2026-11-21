@@ -271,6 +271,7 @@ class TableCore:
         self._stop = threading.Event()
         self._running = False
         self._error = ""
+        self._interrupted = False
         self._finished = False
         self._paused = False
         self._awaiting_next = False
@@ -325,6 +326,7 @@ class TableCore:
             self._stop.clear()
             self._finished = False
             self._error = ""
+            self._interrupted = False
             self._load_or_new(resume=resume)
             self._running = True
             self._ready.set()
@@ -336,6 +338,7 @@ class TableCore:
     def run_sync(self, *, resume: bool = True) -> None:
         with self.lock:
             self._load_or_new(resume=resume)
+            self._interrupted = False
             self._running = True
             self._ready.set()
         self._run_guard()
@@ -366,7 +369,9 @@ class TableCore:
             with self.lock:
                 self._error = f"{type(exc).__name__}: {exc}"
                 self.log.append("*** 内核出错：" + str(exc))
-                self._finished = True
+                # 外部模型/网络出错不该把整场牌判死：保留牌局，让用户点“继续”重试。
+                self._interrupted = True
+                self._finished = False
         finally:
             with self.lock:
                 self._running = False
@@ -394,12 +399,20 @@ class TableCore:
                 "running": bool(self._running and t and t.is_alive()) if t else bool(self._running),
                 "finished": bool(self._finished),
                 "error": self._error,
+                "interrupted": bool(self._interrupted),
+                "can_continue": self._can_continue_locked(),
                 "round": self.round,
                 "rounds": self.rounds,
                 "context_round": self.context_round,
                 "context_rounds": self.rounds,
                 "steps": self.steps,
             }
+
+    def _can_continue_locked(self) -> bool:
+        """被外部错误打断、牌局还没结束时，允许从原地下一步重试。"""
+        game = self.game
+        return bool(self._interrupted and not self._finished and game is not None
+                    and game.result is None and game.phase != "ended")
 
     # ---------- 载入 / 新开 ----------
 
@@ -1111,6 +1124,7 @@ class TableCore:
                 self._last_result = game.result or {}
             self._start_next_round_locked()
             self._stop.clear()
+            self._interrupted = False
             self._running = True
             self._ready.set()
         t = threading.Thread(target=self._run_guard, name="mahjong-core", daemon=True)
@@ -1163,6 +1177,31 @@ class TableCore:
             self.ui.resume_play()
             return {"ok": True}
         return {"ok": False, "message": "当前 UI 不支持继续"}
+
+    def resume_after_error(self) -> dict:
+        """从内核错处继续：不重读存档，保留牌局和 LLM 对话。"""
+        with self.lock:
+            if self._running:
+                return {"ok": False, "message": "牌桌还在跑"}
+            old = self._thread
+        if old and old.is_alive() and old is not threading.current_thread():
+            old.join(timeout=1.0)
+        with self.lock:
+            if old and old.is_alive():
+                return {"ok": False, "message": "上一轮还在收尾，稍等"}
+            if not self._can_continue_locked():
+                return {"ok": False, "message": "当前没有可继续的牌局"}
+            self._error = ""
+            self._interrupted = False
+            self._finished = False
+            self._paused = False
+            self._stop.clear()
+            self._running = True
+            self._ready.set()
+            t = threading.Thread(target=self._run_guard, name="mahjong-core", daemon=True)
+            self._thread = t
+        t.start()
+        return {"ok": True, "message": "继续打", "round": self.round}
 
     # ---------- 供 UI 读的状态 ----------
 
@@ -1286,6 +1325,8 @@ class TableCore:
                 "running": bool(self._running),
                 "finished": bool(self._finished),
                 "error": self._error,
+                "interrupted": bool(self._interrupted),
+                "can_continue": self._can_continue_locked(),
                 "debug": bool(debug),
                 "own_seat": own,
                 "seats": seats,
