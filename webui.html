@@ -219,6 +219,20 @@
     padding:7px 9px;border:1px solid #315c48;border-radius:8px;background:rgba(255,255,255,.04);
     font-size:12px;color:#d6eadc}
   .frame-row button{padding:5px 9px;font-size:12px}
+  .save-list{display:flex;flex-direction:column;gap:8px;max-height:46vh;overflow:auto;margin-top:8px}
+  .save-row{padding:10px 11px;border:1px solid #315c48;border-radius:10px;background:rgba(255,255,255,.04)}
+  .save-row-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+  .save-name{font-size:14px;font-weight:700;color:#f5f1df;line-height:1.35}
+  .save-meta{font-size:11px;color:#8db7a0;margin-top:2px;line-height:1.5}
+  .save-score{font-size:12px;color:#ffd6a8;margin-top:6px;line-height:1.5}
+  .save-last{font-size:11px;color:#a9c9b7;margin-top:4px;line-height:1.5}
+  .save-actions{display:flex;gap:6px;margin-top:8px;justify-content:flex-end}
+  .save-actions button{padding:5px 9px;font-size:12px}
+  .save-empty{font-size:12px;color:#8db7a0;padding:14px;text-align:center;border:1px dashed #315c48;border-radius:10px}
+  .save-form{display:flex;gap:8px;margin-top:10px}
+  .save-form input{flex:1;min-width:0;background:#0b2017;border:1px solid #315c48;border-radius:8px;
+    color:#f5f1df;padding:8px 10px;font-size:13px}
+  .save-form button{white-space:nowrap}
   .modal-payers{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
   .payer{font-size:11px;padding:3px 6px;border-radius:5px;background:rgba(255,255,255,.1);color:#ffd6a8}
   .modal-board{font-size:12px;color:#cfe7d9;margin-top:7px;line-height:1.6}
@@ -278,6 +292,7 @@
       <button class="ghost" id="btn-pause" disabled>暂停</button>
       <button class="ghost" id="btn-end" disabled>提前结束上下文</button>
       <button class="gold hidden" id="btn-next" disabled>下一局</button>
+      <button class="ghost" id="btn-saves" disabled>存档</button>
       <button class="ghost" id="btn-undo" disabled>回退</button>
       <button class="ghost" id="btn-context">LLM上下文</button>
       <button class="ghost" id="btn-settings">新桌设置</button>
@@ -426,6 +441,25 @@
     <div class="modal-actions">
       <button class="ghost" id="context-cancel">取消</button>
       <button class="gold" id="context-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal hidden" id="saves-modal">
+  <div class="modal-card wide">
+    <h2 class="modal-title">牌局存档</h2>
+    <div class="modal-text" id="saves-current">当前牌桌还没起来。</div>
+    <div class="save-form">
+      <input id="save-name" maxlength="60" placeholder="档名，留空自动起名" autocomplete="off">
+      <button class="gold" id="save-create">存本场</button>
+    </div>
+    <div class="settings-note" id="saves-note">
+      一档保存一场连续牌局；接档会覆盖当前桌，当前进度会先备份。
+    </div>
+    <div class="modal-label">已有存档</div>
+    <div class="save-list" id="save-list"></div>
+    <div class="modal-actions">
+      <button class="ghost" id="saves-close">关闭</button>
     </div>
   </div>
 </div>

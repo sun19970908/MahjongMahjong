@@ -54,6 +54,26 @@ python rollback.py --latest     # 回到最近一帧
 
 恢复前会把当前 `state.json` 备份成 `state.before-rollback.json`；停掉牌桌进程后，再运行 `python play.py` 接着打。
 
+## 牌局存档（`saves/`）
+
+`state.json` 是 live 自动档，只跟当前这一手/这一局。想把一场连续牌局冻结下来，用“存档”：
+
+- 网页顶栏“存档” → “存本场”，把当前 `state.json` 和本场局级账本写进 `saves/<id>/`；
+- 一档一个目录：`manifest.json` 存摘要和逐局结果，`state.json` 存可接回的完整牌局；
+- “接档”会先备份当前 `state.json` 成 `state.before-load-*.json`，再换档重启内核；
+- manifest 不写四家暗手，只有已经公开的赢家胡牌和结算。
+
+命令行等价：
+
+```bash
+python save_store.py list
+python save_store.py save --name "六局"
+python save_store.py load <档id>
+python save_store.py delete <档id>
+```
+
+旧版本没有局级账本，第一次接旧档只会补记“当前已结算的这一局”；前面的局在 manifest 里标成 `history_partial`，不会伪造。
+
 ## 玩家档案（`profiles/<名字>/profile.json`）
 
 模型接入写在档案的 `llm` 段，每座牌友可以各配各的（参考 `G:\AI\livliv-pet\llm.config.json`）：

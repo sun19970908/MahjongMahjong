@@ -39,6 +39,7 @@ from referee import melds_from_ids, parse_tile, tile_id, tile_name, ting_hint_li
 ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / "state.json"
 SNAP_ROOT = ROOT / "snapshots"
+SAVE_ROOT = ROOT / "saves"
 TRACE_PATH = ROOT / "trace.jsonl"
 SUIT = {"m": "万", "p": "饼", "s": "条"}
 PHASE_LABEL = {
@@ -80,6 +81,7 @@ class CoreConfig:
     root: Path = ROOT
     state_path: Path = STATE_PATH
     snap_root: Path = SNAP_ROOT
+    save_root: Path = SAVE_ROOT
     trace_path: Path = TRACE_PATH
 
     def normalized(self) -> "CoreConfig":
@@ -305,6 +307,9 @@ class TableCore:
         self._context_cut_next = False
         self.run_id = ""
         self.snap_dir = self.cfg.snap_root / "unstarted"
+        self.round_history: list[dict] = []
+        self.match_started_at = ""
+        self._round_started_at = ""
         self._ended_early = False
         self._stopped_by_limit = False
         self._last_result: dict | None = None
@@ -440,12 +445,23 @@ class TableCore:
             self.log = list(meta.get("log") or [])
             self.said = {int(k): str(v) for k, v in (meta.get("said") or {}).items() if str(v).strip()}
             self.chat_messages = list(meta.get("chat") or [])
+            self.round_history = [
+                rec for rec in (meta.get("round_history") or [])
+                if isinstance(rec, dict) and rec.get("round")
+            ][-200:]
+            self.match_started_at = str(meta.get("match_started_at") or "")
+            self._round_started_at = str(meta.get("round_started_at") or "")
             self._build_table(meta=meta)
             self._restore_llm(meta)
             if game.result is not None or game.phase == "ended":
                 self._finished = True
                 self._last_result = game.result
                 self._broadcast = str(meta.get("broadcast") or "")
+                # 旧存档没有局级账本；载入已收局的档时补记当前这一局，
+                # 不假装前面的局都有记录。
+                if game.result:
+                    self._record_round_locked(game.result)
+                    self._safe_persist_locked()
             return
 
         self.round = 1
@@ -471,6 +487,10 @@ class TableCore:
         self.board = {s: 0 for s in range(4)}
         self.lap = 1
         self._lap_anchor = self.game.dealer
+        self.round_history = []
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.match_started_at = now
+        self._round_started_at = now
         self.log.append(f"—— 第 1 局：{seats_mod.label(self.game.dealer)} 号坐庄 ——")
         for p in self.table.of_kind("llm"):
             p.impl.reset_temp_notes()
@@ -764,6 +784,36 @@ class TableCore:
         if nxt == self._lap_anchor and self.game.dealer != self._lap_anchor:
             self.lap += 1
 
+    def _record_round_locked(self, res: dict | None = None) -> None:
+        """把这一局的结果、分数和动作日志记进本场账本。
+
+        账本只存已经结算的局；当前进行中的局等 `_finish_round()` 再记。
+        旧存档没有账本时按空数组兼容，不伪造历史。
+        """
+        if self.game is None:
+            return
+        res = res or self.game.result or {}
+        if not res:
+            return
+        rnd = int(self.round)
+        if any(int(x.get("round") or 0) == rnd for x in self.round_history):
+            return
+        payload = _result_payload(res) or {}
+        record = {
+            "round": rnd,
+            "lap": int(self.lap),
+            "dealer": seats_mod.label(self.game.dealer),
+            "result": payload,
+            "board_after": {str(s + 1): int(self.board.get(s, 0)) for s in range(4)},
+            "steps": int(self.steps),
+            "started_at": self._round_started_at or "",
+            "ended_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "settle_text": str((payload.get("settle") or {}).get("text") or ""),
+            "log": list(self.log[-80:]),
+        }
+        self.round_history.append(record)
+        self.round_history = self.round_history[-200:]
+
     def _finish_round(self) -> bool:
         with self.lock:
             game = self.game
@@ -779,6 +829,7 @@ class TableCore:
                     winner = int(res["seat"])
                     self.board[winner] = self.board.get(winner, 0) + sum(
                         int(v) for v in (settle.get("payers") or {}).values())
+            self._record_round_locked(res)
             self._broadcast = make_broadcast(
                 self.round, res, self.board, self.me, self._ended_early)
             self._chat_broadcast_seats.clear()
@@ -868,6 +919,7 @@ class TableCore:
         ))
         self.game.start()
         self.log.clear()
+        self._round_started_at = time.strftime("%Y-%m-%d %H:%M:%S")
         self.log.append(f"—— 第 {self.round} 局：{seats_mod.label(nxt)} 号坐庄 ——")
         self.said.clear()
         self._last_result = None
@@ -925,9 +977,13 @@ class TableCore:
             "rounds": self.rounds,
             "lap": int(self.lap),
             "lap_anchor": self._lap_anchor,
+            "match_started_at": self.match_started_at,
+            "round_started_at": self._round_started_at,
+            "round_history": self.round_history[-200:],
             "context_start_round": self._context_start_round,
             "context_cut_next": self._context_cut_next,
             "board": {str(k): v for k, v in self.board.items()},
+            "names": {str(k): v for k, v in self.names.items()},
             "chat": self.chat_messages[-30:],
             "broadcast": self._broadcast,
             "agent_wait": self.cfg.agent_wait,

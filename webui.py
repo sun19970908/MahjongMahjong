@@ -22,12 +22,14 @@ import queue
 import threading
 import time
 import webbrowser
+from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import seats as seats_mod
+import save_store
 from core import CoreConfig, TableCore
 from players import EndEarly
 
@@ -289,6 +291,66 @@ class WebTable:
         with self.lock:
             return {"ok": True, "frames": self.core.snapshots() if self.core else []}
 
+    def saves(self) -> dict:
+        with self.lock:
+            c = self.core
+            root = c.cfg.save_root if c is not None else save_store.SAVE_ROOT
+            return {"ok": True, "saves": save_store.list_saves(root)}
+
+    def create_save(self, name: str = "") -> dict:
+        with self.lock:
+            c = self.core
+            state_path = c.cfg.state_path if c is not None else STATE_PATH
+            root = c.cfg.save_root if c is not None else save_store.SAVE_ROOT
+        try:
+            item = save_store.create(state_path, name=name or None, save_root=root)
+        except Exception as exc:                         # noqa: BLE001
+            return {"ok": False, "message": f"存档失败：{exc}"}
+        return {"ok": True, "save": item, "message": "已存档"}
+
+    def load_save(self, save_id: str) -> dict:
+        with self.lock:
+            if not save_id:
+                return {"ok": False, "message": "缺少档 id"}
+            c = self.core
+            old_cfg = c.cfg if c is not None else self._config()
+            src = save_store.state_path(save_id, old_cfg.save_root)
+            if src is None:
+                return {"ok": False, "message": "找不到这个存档"}
+            item = save_store.get(save_id, old_cfg.save_root) or {}
+            self._stop_core()
+            try:
+                save_store.restore_state(save_id, old_cfg.state_path,
+                                         save_root=old_cfg.save_root)
+            except Exception as exc:                     # noqa: BLE001
+                self.error = str(exc)
+                return {"ok": False, "message": f"接档失败：{exc}"}
+            ui = WebUi()
+            core = TableCore(replace(old_cfg, players=""), ui)
+            ui.bind(core)
+            self.ui = ui
+            self.core = core
+            try:
+                core.start(resume=True, background=True)
+                self.context_rounds = core.rounds
+            except Exception as exc:                     # noqa: BLE001
+                self.error = str(exc)
+                return {"ok": False, "message": str(exc)}
+            return {"ok": True, "save": item,
+                    "message": f"已接档：{item.get('name') or save_id}"}
+
+    def delete_save(self, save_id: str) -> dict:
+        with self.lock:
+            c = self.core
+            root = c.cfg.save_root if c is not None else save_store.SAVE_ROOT
+            try:
+                ok = save_store.delete(save_id, root)
+            except Exception as exc:                     # noqa: BLE001
+                return {"ok": False, "message": f"删档失败：{exc}"}
+            if not ok:
+                return {"ok": False, "message": "找不到这个存档"}
+            return {"ok": True, "message": "已删档"}
+
     def rollback(self, name: str) -> dict:
         with self.lock:
             c = self.core
@@ -357,6 +419,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/snapshots":
             self._json(self.table.snapshots())
             return
+        if path == "/api/saves":
+            self._json(self.table.saves())
+            return
         if path in ("/", "/index.html"):
             self._send(HTML_PATH.read_bytes(), ctype="text/html")
             return
@@ -400,6 +465,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/rollback":
             self._json(self.table.rollback(str(body.get("name") or body.get("step") or "")))
+            return
+        if path == "/api/saves":
+            self._json(self.table.create_save(str(body.get("name") or "")))
+            return
+        if path == "/api/saves/load":
+            self._json(self.table.load_save(str(body.get("id") or "")))
+            return
+        if path == "/api/saves/delete":
+            self._json(self.table.delete_save(str(body.get("id") or "")))
             return
         if path == "/api/chat":
             self._json(self.table.chat(str(body.get("text") or ""),

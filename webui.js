@@ -694,6 +694,7 @@
     $("btn-continue").classList.toggle("hidden", !state.interrupted);
     $("btn-quit").disabled = !state.running && state.finished !== true;
     $("btn-settings").disabled = false;
+    $("btn-saves").disabled = false;
 
     renderScorebar();
     renderSpeechBar();
@@ -962,6 +963,125 @@
     $("undo-modal").classList.remove("hidden");
   }
 
+  function scoreLine(board) {
+    if (!board) return "";
+    return Object.keys(board).sort((a, b) => Number(a) - Number(b))
+      .map((s) => `${s}号 ${Number(board[s]) >= 0 ? "+" : ""}${board[s]}`)
+      .join("，");
+  }
+
+  function resultLine(result) {
+    if (!result) return "还没有结算";
+    if (result.type === "draw_game") return "荒庄";
+    if (!result.seat) return result.reason || result.type || "无结果";
+    const tile = result.tile ? ` 胡 ${tileName(result.tile)}` : "";
+    const how = result.zimo ? "自摸" : (result.from ? `${result.from}号点炮` : "");
+    return `${result.seat}号${tile}${how ? `（${how}）` : ""}`;
+  }
+
+  async function openSaves() {
+    const current = $("saves-current");
+    const list = $("save-list");
+    list.replaceChildren();
+    current.textContent = state && state.ok
+      ? `当前：第 ${state.round || 1} 局 · ${scoreLine(state.board)}`
+      : "当前牌桌还没起来。";
+    try {
+      const res = await fetch("/api/saves", { cache: "no-store" });
+      const data = await res.json();
+      const saves = data.saves || [];
+      if (!saves.length) {
+        const empty = document.createElement("div");
+        empty.className = "save-empty";
+        empty.textContent = "还没有存档。点“存本场”把这一场冻起来。";
+        list.appendChild(empty);
+      } else {
+        for (const item of saves) list.appendChild(saveRow(item));
+      }
+    } catch (err) {
+      toast("取存档失败：" + err);
+    }
+    $("saves-modal").classList.remove("hidden");
+  }
+
+  function saveRow(item) {
+    const row = document.createElement("div");
+    row.className = "save-row";
+
+    const head = document.createElement("div");
+    head.className = "save-row-head";
+    const left = document.createElement("div");
+    const name = document.createElement("div");
+    name.className = "save-name";
+    name.textContent = item.name || item.id;
+    left.appendChild(name);
+    const meta = document.createElement("div");
+    meta.className = "save-meta";
+    const played = Number(item.rounds_played || 0);
+    const expected = Number(item.rounds_expected || 0);
+    const partial = item.history_partial ? ` · 明细 ${played}/${expected}（有缺局）` : "";
+    meta.textContent = `${item.created_at || ""} · 第 ${item.round || "?"} 局${partial}`;
+    left.appendChild(meta);
+    head.appendChild(left);
+    row.appendChild(head);
+
+    const score = document.createElement("div");
+    score.className = "save-score";
+    score.textContent = scoreLine(item.board) || "累计分 —";
+    row.appendChild(score);
+
+    const last = document.createElement("div");
+    last.className = "save-last";
+    const settleText = item.last_result
+      ? (item.last_result.settle_text || (item.last_result.settle && item.last_result.settle.text) || "")
+      : "";
+    last.textContent = `最后一局：${resultLine(item.last_result)}`
+      + (settleText ? ` · ${settleText}` : "");
+    row.appendChild(last);
+
+    const actions = document.createElement("div");
+    actions.className = "save-actions";
+    const load = document.createElement("button");
+    load.className = "gold";
+    load.textContent = "接档";
+    load.addEventListener("click", async () => {
+      const warn = `接档「${item.name || item.id}」会覆盖当前牌桌。\n当前进度会先备份到 state.before-load-*.json。`;
+      if (!window.confirm(warn)) return;
+      const r = await post("/api/saves/load", { id: item.id });
+      if (r && r.ok) {
+        $("saves-modal").classList.add("hidden");
+        resetTableState();
+        toast(r.message || "已接档");
+      }
+    });
+    actions.appendChild(load);
+    const del = document.createElement("button");
+    del.className = "ghost";
+    del.textContent = "删除";
+    del.addEventListener("click", async () => {
+      if (!window.confirm(`删除存档「${item.name || item.id}」？`)) return;
+      const r = await post("/api/saves/delete", { id: item.id });
+      if (r && r.ok) {
+        toast(r.message || "已删档");
+        await openSaves();
+      }
+    });
+    actions.appendChild(del);
+    row.appendChild(actions);
+    return row;
+  }
+
+  async function createSave() {
+    const input = $("save-name");
+    const name = input.value.trim();
+    const r = await post("/api/saves", { name });
+    if (r && r.ok) {
+      input.value = "";
+      toast(r.message || "已存档");
+      await openSaves();
+    }
+  }
+
   function toggleDebug() {
     if (!state || !state.debug) return;
     showAll = !showAll;
@@ -973,6 +1093,7 @@
   $("btn-pause").addEventListener("click", togglePause);
   $("btn-end").addEventListener("click", endGame);
   $("btn-next").addEventListener("click", nextRound);
+  $("btn-saves").addEventListener("click", openSaves);
   $("btn-undo").addEventListener("click", openUndo);
   $("btn-context").addEventListener("click", openContextSettings);
   $("btn-settings").addEventListener("click", openSettings);
@@ -993,6 +1114,11 @@
   $("context-cancel").addEventListener("click", () => $("context-modal").classList.add("hidden"));
   $("context-save").addEventListener("click", saveContextSettings);
   $("undo-cancel").addEventListener("click", () => $("undo-modal").classList.add("hidden"));
+  $("saves-close").addEventListener("click", () => $("saves-modal").classList.add("hidden"));
+  $("save-create").addEventListener("click", createSave);
+  $("save-name").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") createSave();
+  });
   $("modal-next").addEventListener("click", nextRound);
   $("modal-cut").addEventListener("click", endGame);
   $("modal-close").addEventListener("click", () => $("modal").classList.add("hidden"));
@@ -1007,6 +1133,7 @@
       $("settings-modal").classList.add("hidden");
       $("context-modal").classList.add("hidden");
       $("undo-modal").classList.add("hidden");
+      $("saves-modal").classList.add("hidden");
     }
   });
 
