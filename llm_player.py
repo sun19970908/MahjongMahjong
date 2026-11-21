@@ -1385,8 +1385,8 @@ class LLMPlayer:
         if not self.cache_stats:
             return None
         row = dict(self.cache_stats[-1])
-        if len(self.cache_stats) > 1:
-            row["previous_hit_rate"] = self.cache_stats[-2].get("hit_rate")
+        recent = [r.get("hit_rate") for r in self.cache_stats[-5:] if r.get("prompt")]
+        row["recent_hit_rates"] = [round(float(x), 3) for x in recent]
         return row
 
     def cache_report(self) -> str:
@@ -2050,6 +2050,10 @@ def _selftest() -> int:
     p10.decide(d)
     case("缓存表记了本次速度", p10.cache_stats[0]["speed"], 75.0)
     case("只取最近一次命中率", p10.latest_stats()["hit_rate"], 0.989)
+    p10.cache_stats = [{"prompt": 100, "hit_rate": x} for x in
+                       (0.91, 0.92, 0.93, 0.94, 0.95, 0.96)]
+    case("带最近五次命中率", p10.latest_stats()["recent_hit_rates"],
+         [0.92, 0.93, 0.94, 0.95, 0.96])
 
     print()
     print(f"共 {fails} 条失败")

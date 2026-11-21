@@ -99,12 +99,16 @@
     const wrap = document.createElement("span");
     wrap.className = "llm-live";
     const hitRate = Number(stats.hit_rate || 0);
-    const prevRate = stats.previous_hit_rate;
-    wrap.title = prevRate == null
-      ? "本次请求；缓存命中率按与上一次请求体的复用计算"
-      : `本次请求；缓存命中率按与上一次请求体的复用计算（上次 ${(Number(prevRate) * 100).toFixed(1)}%）`;
+    const recent = (Array.isArray(stats.recent_hit_rates) ? stats.recent_hit_rates : [])
+      .slice(-5)
+      .reverse();
+    const recentText = recent
+      .map((x) => (Number(x) * 100).toFixed(1) + "%")
+      .join(" / ");
     const hit = document.createElement("span");
     hit.className = "hit";
+    hit.title = "缓存命中率按与上一次请求体的复用计算"
+      + (recentText ? `\n最近5次（最新在前）：${recentText}` : "");
     hit.textContent = `缓存 ${stats.prompt ? (hitRate * 100).toFixed(1) + "%" : "—"}`;
     const speed = document.createElement("span");
     speed.className = "speed";
