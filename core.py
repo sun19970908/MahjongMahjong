@@ -298,6 +298,8 @@ class TableCore:
         self.steps = 0
         self.round = 1
         self.rounds = self.cfg.rounds
+        self.lap = 1                    # 当前第几圈：庄家轮一圈才算下一圈
+        self._lap_anchor: int | None = None   # 本场起始庄家；默认 1 号
         self._context_start_round = 1
         self._context_cut_next = False
         self.run_id = ""
@@ -410,6 +412,9 @@ class TableCore:
             game, meta = saved
             self.game = game
             self._load_meta(meta)
+            self.lap = max(1, int(meta.get("lap") or 1))
+            anchor = meta.get("lap_anchor")
+            self._lap_anchor = int(anchor) if str(anchor) in ("0", "1", "2", "3") else 0
             self.rounds = max(1, min(99, int(meta.get("rounds") or self.cfg.rounds or 1)))
             self.steps = int(meta.get("steps") or 0)
             self.round = int(meta.get("round") or 1)
@@ -451,6 +456,8 @@ class TableCore:
         self.run_id = time.strftime("%Y%m%d-%H%M%S")
         self.snap_dir = self.cfg.snap_root / self.run_id
         self.board = {s: 0 for s in range(4)}
+        self.lap = 1
+        self._lap_anchor = self.game.dealer
         self.log.append(f"—— 第 1 局：{seats_mod.label(self.game.dealer)} 号坐庄 ——")
         for p in self.table.of_kind("llm"):
             p.impl.reset_temp_notes()
@@ -734,6 +741,16 @@ class TableCore:
 
     # ---------- 一手结束 / 多局 ----------
 
+    def _note_lap_after_round(self, winner: int | None) -> None:
+        """一圈=庄家轮一圈；回到本场起始庄家才加一，连庄/荒庄会拖长。"""
+        if self.game is None:
+            return
+        if self._lap_anchor is None:
+            self._lap_anchor = self.game.dealer
+        nxt = seats_mod.next_dealer(self.game.dealer, winner, 4)
+        if nxt == self._lap_anchor and self.game.dealer != self._lap_anchor:
+            self.lap += 1
+
     def _finish_round(self) -> bool:
         with self.lock:
             game = self.game
@@ -765,8 +782,11 @@ class TableCore:
             # rounds 现在是 LLM 上下文窗口，不再决定整场打几局。只有用户主动
             # 停止/步数上限才收场；普通一局结束都停下来等“下一局”。
             last = self._ended_early or self._stopped_by_limit
+            if not last:
+                self._note_lap_after_round((res or {}).get("seat"))
             info = {
                 "round": self.round,
+                "lap": int(self.lap),
                 "rounds": self.rounds,
                 "context_round": self.context_round,
                 "context_cut_next": bool(self._context_cut_next),
@@ -870,6 +890,8 @@ class TableCore:
         """给 LLM 的局面补上第几局和四家累计分；只改这一份拷贝。"""
         merged = dict(view)
         merged["round"] = int(self.round)
+        merged["lap"] = int(self.lap)
+        merged["lap_anchor"] = int(self._lap_anchor) if self._lap_anchor is not None else 0
         merged["board"] = {s + 1: int(self.board.get(s, 0)) for s in range(4)}
         merged["names"] = {s + 1: self.names.get(s, f"{s + 1}号") for s in range(4)}
         return merged
@@ -888,6 +910,8 @@ class TableCore:
             "snapshot_run": self.run_id,
             "round": self.round,
             "rounds": self.rounds,
+            "lap": int(self.lap),
+            "lap_anchor": self._lap_anchor,
             "context_start_round": self._context_start_round,
             "context_cut_next": self._context_cut_next,
             "board": {str(k): v for k, v in self.board.items()},
@@ -1284,6 +1308,8 @@ class TableCore:
                 "steps": int(self.steps),
                 "round": int(self.round),
                 "rounds": int(self.rounds),
+                "lap": int(self.lap),
+                "lap_anchor": None if self._lap_anchor is None else seats_mod.label(self._lap_anchor),
                 "context_round": int(self.context_round),
                 "context_rounds": int(self.rounds),
                 "context_cut_next": bool(self._context_cut_next),

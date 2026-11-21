@@ -141,7 +141,8 @@ def render(state: dict, *, me_no: int | None, refresh: float = 0.0) -> str:
             names[int(meta[key])] = key
 
     parts = ['<div class="wrap">', "<h1>麻将桌</h1>",
-             f'<div class="meta">第 {meta.get("steps", 0)} 步 · '
+             f'<div class="meta">第 {meta.get("round", 1)} 局 · 第 {meta.get("lap", 1)} 圈 · '
+             f'第 {meta.get("steps", 0)} 步 · '
              f'{PHASE_NAME.get(gs.get("phase", ""), gs.get("phase", "?"))} · '
              f'牌墙 {len(wall)} 张</div>', '<div class="table">']
 

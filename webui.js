@@ -189,7 +189,7 @@
       context.textContent = "LLM上下文 —/—";
       return;
     }
-    round.textContent = `第 ${state.round || 1} 局 · 第 ${state.steps || 0} 步`;
+    round.textContent = `第 ${state.round || 1} 局 · 第 ${state.lap || 1} 圈 · 第 ${state.steps || 0} 步`;
     context.textContent = `LLM上下文 ${state.context_round || 1}/${state.context_rounds || state.rounds || 1}`;
     if (state.context_cut_next) context.textContent += " · 下一局清空";
     else if (!state.finished && (state.context_round || 1) >= (state.context_rounds || state.rounds || 1)) {

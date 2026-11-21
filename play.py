@@ -238,7 +238,7 @@ class TuiUi:
         if core.game is None:
             return
         st = status or (self.status(core, d) if d else "牌桌")
-        st += f" · 第{core.round}局 · LLM上下文 {core.context_round}/{core.rounds}"
+        st += f" · 第{core.round}局 · 第{core.lap}圈 · LLM上下文 {core.context_round}/{core.rounds}"
         draw_screen(screen(core.game, core.me, core.buddy, st, core.log,
                            pick, self.said_text(), core.names,
                            d.kind if d else None))

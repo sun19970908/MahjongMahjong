@@ -494,7 +494,12 @@ class LLMPlayer:
             wall_s += "\n（你本局放过胡，已经不准再胡了）"
         score = []
         if view.get("round"):
-            score.append(f"【第{int(view['round'])}局 · 累计输赢】")
+            lap = int(view.get("lap") or 1)
+            anchor = int(view.get("lap_anchor") or 0)
+            score.append(
+                f"【第{int(view['round'])}局 · 第{lap}圈"
+                f"（从{seats.label(anchor)}号坐庄起算） · 累计输赢】"
+            )
             names = view.get("names") or {}
             board = view.get("board") or {}
             for no in range(1, int(view.get("seats") or 4) + 1):
@@ -1662,13 +1667,15 @@ def _selftest() -> int:
     # 5b-1 累计输赢里不能把真人显示名里的“你”原样喂回去，只标当前 LLM 自己
     score_view = dict(d.view)
     score_view.update({
-        "round": 2, "seats": 4, "seat": 1,
+        "round": 2, "lap": 2, "lap_anchor": 0, "seats": 4, "seat": 1,
         "names": {1: "1号（接入）", 2: "方小满（2号）", 3: "3号（你）", 4: "夏栀（4号）"},
         "board": {1: -16, 2: -16, 3: 40, 4: -8},
     })
     score_text = p2._describe(score_view)
     case("记账簿不把真人当自己", "3号（你）" in score_text, False)
     case("只给当前座位标你", "方小满（你）" in score_text, True)
+    case("镜头里有圈数", "第2圈" in score_text, True)
+    case("圈数写明起算庄家", "从1号坐庄起算" in score_text, True)
 
     # 5b-2 报听之后只给最低预算，除非这一手能胡/能杠
     tinged = dict(d.view)
