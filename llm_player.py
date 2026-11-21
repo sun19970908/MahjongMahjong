@@ -50,6 +50,8 @@ _ALWAYS = ("；另外这三件随手就能喊：chat（要开口时单独一轮�
            "pause（这手先不打，why 直接说，不用再调 chat）、"
            "edit_note（临时笔记 target=temp；长期笔记局中只能 target=long 追加草稿，记完接着打这一手）")
 
+_ACTION_NAMES = {"discard", "pon", "kan", "chi", "win", "bloom", "pass", "ting"}
+
 
 # ---------------------------------------------------------------- HTTP
 
@@ -57,7 +59,8 @@ _ALWAYS = ("；另外这三件随手就能喊：chat（要开口时单独一轮�
 class ChatResult:
     content: str = ""
     reasoning: str = ""
-    tool_call: dict | None = None      # {"name": str, "arguments": dict}
+    tool_call: dict | None = None      # 第一个调用，兼容老调用方
+    tool_calls: list[dict] = field(default_factory=list)  # 原始 id/name/arguments/parse_ok
     tokens: int = 0
     seconds: float = 0.0
     finish: str = ""
@@ -69,6 +72,13 @@ class ChatResult:
     @property
     def speech(self) -> str:
         return (self.content or "").strip()
+
+    @property
+    def calls(self) -> list[dict]:
+        """这一轮的原始调用；老测试只塞 tool_call 时也当一条看。"""
+        if self.tool_calls:
+            return self.tool_calls
+        return [self.tool_call] if self.tool_call else []
 
     @property
     def hit_rate(self) -> float:
@@ -94,6 +104,31 @@ def _usage_of(usage: dict | None) -> tuple[int, int]:
     prompt = int(u.get("prompt_tokens") or 0)
     cached = int((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
     return prompt, cached
+
+
+def _tool_calls_of(raw_calls: list[dict]) -> list[dict]:
+    """把上游的调用统一成可回放的样子：原始参数串留着，解析结果单独放。"""
+    out: list[dict] = []
+    for i, c in enumerate(raw_calls):
+        name = str(c.get("name") or "")
+        raw = str(c.get("arguments") or "{}")
+        try:
+            args = json.loads(raw or "{}")
+            ok = isinstance(args, dict)
+        except json.JSONDecodeError:
+            args = {}
+            ok = False
+        if not ok:
+            args = {}
+        out.append({
+            "id": str(c.get("id") or ""),
+            "name": name,
+            "arguments": args,
+            "raw_arguments": raw,
+            "parse_ok": ok,
+            "index": int(c.get("index", i)),
+        })
+    return out
 
 
 class StrataClient:
@@ -225,18 +260,13 @@ class StrataClient:
             prompt_tokens, cached_tokens = _usage_of(usage)
             tokens = int((usage or {}).get("completion_tokens") or 0)
             end_at = time.monotonic()
-            tc = None
-            for slot in calls.values():
-                if not slot["name"]:
-                    continue
-                try:
-                    args = json.loads(slot["arguments"] or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                tc = {"name": slot["name"], "arguments": args}
-                break
+            tc_list = _tool_calls_of([
+                {"id": slot["id"], "name": slot["name"], "arguments": slot["arguments"], "index": idx}
+                for idx, slot in calls.items() if slot["name"]
+            ])
             return ChatResult(content="".join(content), reasoning="".join(reasoning),
-                              tool_call=tc, tokens=tokens,
+                              tool_call=tc_list[0] if tc_list else None,
+                              tool_calls=tc_list, tokens=tokens,
                               seconds=round(end_at - t0, 2), finish=finish,
                               aborted=aborted, prompt_tokens=prompt_tokens,
                               cached_tokens=cached_tokens,
@@ -248,20 +278,18 @@ class StrataClient:
             payload = json.loads(resp.read().decode("utf-8"))
         dt = time.monotonic() - t0
         msg = payload["choices"][0]["message"]
-        calls = msg.get("tool_calls") or []
-        tc = None
-        if calls:
-            fn = calls[0]["function"]
-            try:
-                args = json.loads(fn.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                args = {}
-            tc = {"name": fn.get("name"), "arguments": args}
+        raw_calls = []
+        for i, c in enumerate(msg.get("tool_calls") or []):
+            fn = c.get("function") or {}
+            raw_calls.append({"id": c.get("id"), "name": fn.get("name"),
+                              "arguments": fn.get("arguments"), "index": i})
+        tc_list = _tool_calls_of(raw_calls)
         prompt_tokens, cached_tokens = _usage_of(payload.get("usage"))
         return ChatResult(
             content=msg.get("content") or "",
             reasoning=msg.get("reasoning_content") or "",
-            tool_call=tc,
+            tool_call=tc_list[0] if tc_list else None,
+            tool_calls=tc_list,
             tokens=payload.get("usage", {}).get("completion_tokens", 0),
             seconds=round(dt, 2),
             finish=payload["choices"][0].get("finish_reason", ""),
@@ -574,10 +602,53 @@ class LLMPlayer:
 
     def _speech(self, r: ChatResult) -> str:
         """打牌时只认 chat 工具里的发言，正文一律不上桌。"""
-        tc = r.tool_call or {}
-        if tc.get("name") == "chat":
-            return self._short_say((tc.get("arguments") or {}).get("text"))
-        return ""
+        texts = []
+        for tc in r.calls:
+            if tc.get("name") == "chat":
+                text = (tc.get("arguments") or {}).get("text") if isinstance(tc.get("arguments"), dict) else ""
+                if text:
+                    texts.append(str(text))
+        return self._short_say(" ".join(texts)) if texts else ""
+
+    def _append_round(self, r: ChatResult, calls: list[dict], receipts: list[str]) -> None:
+        """按 OpenAI 标准回放一轮：assistant 带原始 tool_calls，后面跟配对的 tool 回执。"""
+        if not calls:
+            return
+        tool_calls = []
+        call_ids = []
+        for i, c in enumerate(calls):
+            call_id = str(c.get("id") or f"call_{len(self.messages)}_{i}")
+            raw = c.get("raw_arguments")
+            if raw is None:
+                raw = json.dumps(c.get("arguments") or {}, ensure_ascii=False)
+            tool_calls.append({
+                "id": call_id,
+                "type": "function",
+                "function": {"name": str(c.get("name") or ""), "arguments": str(raw)},
+            })
+            call_ids.append(call_id)
+        self.messages.append({
+            "role": "assistant", "content": r.speech,
+            **({"reasoning_content": r.reasoning} if r.reasoning else {}),
+            "tool_calls": tool_calls,
+        })
+        for call_id, content in zip(call_ids, receipts):
+            self.messages.append({"role": "tool", "tool_call_id": call_id,
+                                  "content": content})
+
+    def _append_failure(self, r: ChatResult) -> None:
+        """把失败的调用原样还给模型；没有调用时只补一条 user。"""
+        calls = r.calls
+        if not calls:
+            self.messages.append({
+                "role": "assistant", "content": r.speech,
+                **({"reasoning_content": r.reasoning} if r.reasoning else {}),
+            })
+            self.messages.append({"role": "user", "content": "你没有调用工具"})
+            return
+        receipts = ["已发到牌桌。" if c.get("name") == "chat"
+                    else "你没有调用工具，或工具格式错误。" for c in calls]
+        self._append_round(r, calls, receipts)
 
     def _speak(self, d: Decision, budget: int) -> str:
         """锁死的手也要出声：只要一句话，不要结论。
@@ -703,7 +774,6 @@ class LLMPlayer:
 
         budget = self._budget_for(d)
         prompt = self._user_prompt(d, budget)
-        base_len = len(self.messages)
         self.messages.append({"role": "user", "content": prompt})
         t0 = time.monotonic()
 
@@ -716,28 +786,35 @@ class LLMPlayer:
         self._note_cache("吃叉" if d.kind == "react" else "打牌", r1)
         speech = self._speech(r1)
 
-        # 先用 chat 说一句：说话不算动作，记一条回执再让它接着选动作。
-        if (r1.tool_call or {}).get("name") == "chat":
-            chat_args = r1.tool_call.get("arguments") or {}
-            call_id = f"chat_{len(self.messages)}"
-            self.messages += [
-                {"role": "assistant", "content": speech,
-                 **({"reasoning_content": r1.reasoning} if r1.reasoning else {}),
-                 "tool_calls": [{"id": call_id, "type": "function",
-                                 "function": {"name": "chat",
-                                              "arguments": json.dumps(chat_args, ensure_ascii=False)}}]},
-                {"role": "tool", "tool_call_id": call_id, "content": "已发到牌桌。"},
-            ]
-            r1 = self.client.chat(self.messages, model=self.model, tools=d.tools(),
-                                  tool_choice="required",
-                                  reasoning_budget=self.budget_tiny, stream=True,
-                                  on_delta=self._tick)
-            self._note_cache("说完接着打", r1)
-            speech = speech or self._speech(r1)
+        def read_calls(r: ChatResult):
+            cs = r.calls
+            acs = [c for c in cs if c.get("name") in _ACTION_NAMES]
+            chs = [c for c in cs if c.get("name") == "chat"]
+            act = self._action_from_call(acs[0], d.legal) if len(acs) == 1 else None
+            return cs, acs, chs, act
+
+        calls, action_calls, chat_calls, action = read_calls(r1)
+
+        # chat 和单个动作可以同轮：说完这句就这轮落子，不再多问一遍。
+        # 只有 chat、没有动作时，才像以前一样补一轮要动作。
+        if chat_calls and len(action_calls) <= 1 and (not action_calls or action is not None):
+            self._append_round(r1, chat_calls,
+                               ["已发到牌桌。"] * len(chat_calls))
+            if action is None:
+                r1 = self.client.chat(self.messages, model=self.model, tools=d.tools(),
+                                      tool_choice="required",
+                                      reasoning_budget=self.budget_tiny, stream=True,
+                                      on_delta=self._tick)
+                self._note_cache("说完接着打", r1)
+                speech = speech or self._speech(r1)
+                calls, action_calls, chat_calls, action = read_calls(r1)
+                if action is not None and chat_calls:
+                    self._append_round(r1, chat_calls,
+                                       ["已发到牌桌。"] * len(chat_calls))
 
         # 它这一手可能只想先记一笔临时笔记：写下去，再让它接着走这一手（记笔记不算一次动作）
-        if (r1.tool_call or {}).get("name") == "edit_note":
-            note_args = r1.tool_call.get("arguments") or {}
+        if len(calls) == 1 and calls[0].get("name") == "edit_note":
+            note_args = calls[0].get("arguments") or {}
             done = self._apply_note(note_args)
             call_id = f"note_{len(self.messages)}"
             self.messages += [
@@ -754,13 +831,17 @@ class LLMPlayer:
                                   on_delta=self._tick)
             self._note_cache("记完接着打", r1)
             speech = speech or self._speech(r1)
+            calls, action_calls, chat_calls, action = read_calls(r1)
+            if action is not None and chat_calls:
+                self._append_round(r1, chat_calls,
+                                   ["已发到牌桌。"] * len(chat_calls))
 
         # 它要中场暂停：这一手不打；pause.why 就是它的发言，不用再调 chat。
         # 同一个回合最多喊两次，防止它一直"我再想想"把牌局拖死
-        if (r1.tool_call and r1.tool_call.get("name") == "pause"
+        if (len(calls) == 1 and calls[0].get("name") == "pause"
                 and self._pause_calls < 2):
             self._pause_calls += 1
-            why = str((r1.tool_call.get("arguments") or {}).get("why") or "").strip()
+            why = str((calls[0].get("arguments") or {}).get("why") or "").strip()
             said = why or speech or "（停一下）"
             call_id = f"pause_{len(self.messages)}"
             self.messages.append({
@@ -768,50 +849,51 @@ class LLMPlayer:
                 **({"reasoning_content": r1.reasoning} if r1.reasoning else {}),
                 "tool_calls": [{"id": call_id, "type": "function", "function": {
                     "name": "pause",
-                    "arguments": json.dumps(r1.tool_call.get("arguments") or {}, ensure_ascii=False)}}]})
+                    "arguments": json.dumps(calls[0].get("arguments") or {}, ensure_ascii=False)}}]})
             self.messages.append({"role": "tool", "tool_call_id": call_id,
                                   "content": "已暂停，牌先别动，等他说话。"})
             return None, said
 
-        action = self._action_from_call(r1.tool_call, d.legal)
         source = "tool" if action else ""
 
         # 没给出调用：不替它落子，也不把“没调工具”当成 pass。
         # 再逼两遍，只让它把结论变成工具调用；逼不出来就暂停，绝不自动 pass。
-        # 第一次补刀要带上它刚才的话；不带，nothink 看不出结论，会随手挑一个——
-        # 实测它说过“不碰，过”，却挑了个碰。
+        # 每次失败都按标准格式把坏调用和 tool 回执还给它，失败历史不撤销。
         r2 = None
         tries = 0
+        pending = r1 if action is None else None
         while (action is None and tries < 2
                and time.monotonic() - t0 < self.think_seconds - 6):
-            said = speech.strip()
-            if tries == 0 and said:
-                tail = (f"你刚才说的话：『{said}』。把它变成工具调用；"
-                        "话里明确说不碰、不要、过，才调用 pass。")
-            else:
-                tail = ("必须调用工具，不能只说话。从上面的合法动作里选一个，"
-                        "调用对应工具；没有工具调用就不要结束这一手。")
-            msgs2 = self.messages + [{"role": "user", "content": tail + " 不要说话，不要解释。"}]
+            if pending is not None:
+                self._append_failure(pending)
+                pending = None
             try:
-                r2 = self.client.chat(msgs2, model=self.model, tools=d.tools(),
+                r2 = self.client.chat(self.messages, model=self.model, tools=d.tools(),
                                       tool_choice="required",
                                       reasoning_budget=self.budget_tiny,
                                       stream=True, on_delta=self._tick)
                 self._note_cache("补刀", r2)
-                action = self._action_from_call(r2.tool_call, d.legal)
+                speech = speech or self._speech(r2)
+                calls, action_calls, chat_calls, action = read_calls(r2)
+                if action:
+                    if chat_calls and len(action_calls) == 1:
+                        self._append_round(r2, chat_calls,
+                                           ["已发到牌桌。"] * len(chat_calls))
+                    source = "tool2"
+                    break
             except Exception:
                 # 上游偶发坏包/断流：这一手按“没给出工具”处理，暂停等重来，
-                # 不能让一次 JSON 解析错误把整张牌桌打死。
+                # 不能让一次解析错误把整张牌桌打死。
                 r2 = None
                 break
-            if action:
-                source = "tool2"
-                break
+            pending = r2
             tries += 1
+
+        if action is None and pending is not None:
+            self._append_failure(pending)
 
         # 逼不出工具就不落子：牌桌暂停，等它重来，绝不拿 pass 顶账。
         if action is None:
-            del self.messages[base_len:]        # 这一手还没落子，连提问一起撤回，重来时别叠两条 user
             return None, speech.strip()
 
         # 复读闸：和上一手一模一样的话不再摆到牌桌上（牌桌本来就有动作记录）
@@ -859,7 +941,7 @@ class LLMPlayer:
                                   "reasoning_content": reasoning})
             return
         args = self._call_args(action)
-        call_id = f"call_{len(self.records)}"
+        call_id = f"call_exec_{len(self.records)}"
         self.messages.append({
             "role": "assistant", "content": said, "reasoning_content": reasoning,
             "tool_calls": [{"id": call_id, "type": "function",
@@ -873,6 +955,8 @@ class LLMPlayer:
         if not tc:
             return None
         name, args = tc.get("name"), tc.get("arguments") or {}
+        if not isinstance(args, dict):
+            return None
         # 吃只认那两张手牌：被吃的那张由牌桌定，工具里根本没有这个字段
         if name == "chi":
             combo = tuple(sorted(parse_tile(x) for x in str(args.get("combo", "")).split("+") if x))
@@ -1433,6 +1517,9 @@ class LLMPlayer:
             "speech": r1.speech[:400],
             "reasoning_tail": (r1.reasoning or "")[-300:],
             "tool_call": r1.tool_call,
+            "tool_calls": r1.tool_calls,
+            "tool_call_pass2": r2.tool_call if r2 else None,
+            "tool_calls_pass2": r2.tool_calls if r2 else [],
             "source": source,
             "action": action.to_dict(),
             "fallback": fallback,
@@ -1546,6 +1633,64 @@ def _selftest() -> int:
     case("chat 有回执", any(m.get("content") == "已发到牌桌。" for m in pChat.messages), True)
     case("chat 后仍用同一张工具表", fcChat.calls[1]["tools"] == TOOLS, True)
 
+    # 1a2 chat 和打牌同一轮回来：两句都收，不再多问一遍
+    fcCA = _FakeClient([ChatResult(tool_calls=[
+        {"id": "c1", "name": "chat", "arguments": {"text": "我先说一句"},
+         "raw_arguments": '{"text": "我先说一句"}', "parse_ok": True},
+        {"id": "d1", "name": "discard", "arguments": {"tile": pid},
+         "raw_arguments": json.dumps({"tile": pid}, ensure_ascii=False), "parse_ok": True},
+    ])])
+    pCA = LLMPlayer(fcCA, 0, log_path=None)
+    actCA, sayCA = pCA.decide(d)
+    case("chat 和打牌同轮都收", (actCA.kind, tile_id(actCA.tile), sayCA),
+         ("discard", pid, "我先说一句"))
+    case("chat 和打牌同轮只问一次", len(fcCA.calls), 1)
+    case("同轮的 chat 仍有回执",
+         any(m.get("content") == "已发到牌桌。" for m in pCA.messages), True)
+    case("同轮的打牌仍有回执",
+         any(m.get("content") == "已执行：discard " + pid for m in pCA.messages), True)
+
+    # 1a3 坏调用必须原样回放，tool 回执只报那一句
+    bad_args = '{"tile">s1</|DSML｜: "s1"}'
+    case("坏参数解析标记为失败",
+         _tool_calls_of([{"name": "discard", "arguments": bad_args}])[0]["parse_ok"], False)
+    case("好参数解析标记为成功",
+         _tool_calls_of([{"name": "discard", "arguments": '{"tile":"s1"}'}])[0]["parse_ok"], True)
+    fcBad = _FakeClient([
+        ChatResult(tool_calls=[{"id": "bad1", "name": "discard", "arguments": {},
+                                "raw_arguments": bad_args, "parse_ok": False}]),
+        ChatResult(tool_call={"name": "discard", "arguments": {"tile": pid}}),
+    ])
+    pBad = LLMPlayer(fcBad, 0, log_path=None)
+    actBad, _ = pBad.decide(d)
+    case("坏调用后仍能补出动作", (actBad.kind, tile_id(actBad.tile)), ("discard", pid))
+    case("坏调用原样进了历史",
+         fcBad.calls[1]["messages"][-2]["tool_calls"][0]["function"]["arguments"], bad_args)
+    case("坏调用后面跟的是 tool",
+         [m["role"] for m in fcBad.calls[1]["messages"][-2:]], ["assistant", "tool"])
+    case("tool 回执只报失败原因",
+         fcBad.calls[1]["messages"][-1]["content"], "你没有调用工具，或工具格式错误。")
+    case("坏调用没有多插 user", fcBad.calls[1]["messages"][-1]["role"], "tool")
+
+    # 1a4 一轮回了两个打牌工具：算格式错误，两个都回执，不落子
+    fcMulti = _FakeClient([
+        ChatResult(tool_calls=[
+            {"id": "m1", "name": "discard", "arguments": {"tile": pid},
+             "raw_arguments": json.dumps({"tile": pid}, ensure_ascii=False), "parse_ok": True},
+            {"id": "m2", "name": "discard", "arguments": {"tile": pid},
+             "raw_arguments": json.dumps({"tile": pid}, ensure_ascii=False), "parse_ok": True},
+        ]),
+        ChatResult(tool_call={"name": "discard", "arguments": {"tile": pid}}),
+    ])
+    pMulti = LLMPlayer(fcMulti, 0, log_path=None)
+    actMulti, _ = pMulti.decide(d)
+    case("多个打牌工具先不落子", actMulti.kind, "discard")
+    case("多个打牌工具的原调用都留着",
+         len(fcMulti.calls[1]["messages"][-3]["tool_calls"]), 2)
+    case("多个打牌工具都回执",
+         [m["content"] for m in fcMulti.calls[1]["messages"][-2:]],
+         ["你没有调用工具，或工具格式错误。", "你没有调用工具，或工具格式错误。"])
+
     # 1b 闲聊误调 chat：拒一次，仍直接回答
     fcOff = _FakeClient([
         ChatResult(tool_call={"name": "chat", "arguments": {"text": "打牌时说的话"}}),
@@ -1591,17 +1736,21 @@ def _selftest() -> int:
     case("第二遍顺着同一段对话（前缀没变）",
          [m["content"] for m in fc.calls[1]["messages"][:len(fc.calls[0]["messages"])]]
          == [m["content"] for m in fc.calls[0]["messages"]], True)
-    case("第二遍只多一句话", len(fc.calls[1]["messages"]) - len(fc.calls[0]["messages"]), 1)
+    case("第二遍多一条 assistant + 一条 user",
+         len(fc.calls[1]["messages"]) - len(fc.calls[0]["messages"]), 2)
+    case("补刀只报没调工具",
+         fc.calls[1]["messages"][-1]["content"], "你没有调用工具")
     case("第二遍不给它重新想", (fc.calls[1]["model"], fc.calls[1]["reasoning_budget"]), ("strata-lowthink", 40))
 
-    # 3 两遍都没工具 → 不落子，暂停，绝不自动 pass
+    # 3 两遍都没工具 → 不落子，暂停，但失败历史要留下
     fc = _FakeClient([ChatResult(content=f"我打 {pid}。"), ChatResult(content="")])
     p = LLMPlayer(fc, 0, log_path=None)
     before = list(p.messages)
     act, say = p.decide(d)
     case("两遍没工具不落子", act, None)
     case("两遍没工具不写回合记录", len(p.records), 0)
-    case("两遍没工具把这一手的提问撤回", p.messages, before)
+    case("两遍没工具保留失败历史", p.messages != before, True)
+    case("最后一条是没调工具", p.messages[-1]["content"], "你没有调用工具")
     case("两遍没工具也不拿正文上桌", say, "")
 
     # 4 它说了手里没有的牌 → 也不替它兜底
