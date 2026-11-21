@@ -316,7 +316,7 @@ class TableCore:
 
     # ---------- 生命周期 ----------
 
-    def start(self, *, resume: bool, background: bool = True) -> dict:
+    def start(self, *, resume: bool = True, background: bool = True) -> dict:
         with self.lock:
             if self._thread and self._thread.is_alive():
                 return self.status()
@@ -331,7 +331,7 @@ class TableCore:
             self._thread.start()
         return self.status()
 
-    def run_sync(self, *, resume: bool) -> None:
+    def run_sync(self, *, resume: bool = True) -> None:
         with self.lock:
             self._load_or_new(resume=resume)
             self._running = True
@@ -401,7 +401,7 @@ class TableCore:
 
     # ---------- 载入 / 新开 ----------
 
-    def _load_or_new(self, *, resume: bool) -> None:
+    def _load_or_new(self, *, resume: bool = True) -> None:
         saved = state_mod.load(self.cfg.state_path) if resume else None
         if resume and saved is None:
             raise RuntimeError(f"没有存档：{self.cfg.state_path}")

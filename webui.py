@@ -186,7 +186,7 @@ class WebTable:
         self.core = None
         self.ui = None
 
-    def start(self, *, resume: bool = False, overrides: dict | None = None) -> dict:
+    def start(self, *, resume: bool = True, overrides: dict | None = None) -> dict:
         with self.lock:
             self._stop_core()
             self.error = ""
@@ -430,8 +430,7 @@ def main() -> int:
     ap.add_argument("--players", default=DEFAULT_PLAYERS,
                     help="传给内核的座位表；留空=1号 human、2号 llm、3/4 random；"
                          "3号外部接入写 external")
-    ap.add_argument("--new", action="store_true")
-    ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--new", action="store_true", help="新开一局；默认接 state.json")
     ap.add_argument("--debug", action="store_true",
                     help="调试全牌：网页可见四家手牌（本地教学用）")
     ap.add_argument("--context-rounds", type=int, default=1,
@@ -442,18 +441,7 @@ def main() -> int:
 
     table = WebTable(args.players, args.context_rounds)
     if not args.no_start:
-        resume = not args.new
-        if not args.resume and not args.new:
-            try:
-                from state import load
-                saved = load(STATE_PATH)
-                if saved is None or saved[0].result is not None or saved[0].phase == "ended":
-                    resume = False
-            except Exception:
-                resume = False
-        if args.resume:
-            resume = True
-        table.start(resume=resume)
+        table.start(resume=not args.new)
 
     Handler.table = table
     Handler.debug = args.debug

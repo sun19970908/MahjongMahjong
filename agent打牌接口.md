@@ -43,16 +43,16 @@
 开局命令（新一局）：
 
 ```
-python play.py --seat 1 --buddy 2 --agent 3 --trace
+python play.py --new --seat 1 --buddy 2 --agent 3 --trace
 ```
 
 接上一局没打完的（`state.json` 里那份）：
 
 ```
-python play.py --resume --trace
+python play.py --trace
 ```
 
-`--resume` 时座位按存档里的 `meta` 来，`--seat/--buddy/--agent` 这轮不算。想在新窗口开就 `wt.exe -d <项目根> python play.py ...`。
+不带 `--new` 时按存档里的 `meta` 接档，`--seat/--buddy/--agent` 这轮不算；想换座或新开就加 `--new`。想在新窗口开就 `wt.exe -d <项目根> python play.py ...`。
 
 新玩法（2026-11 这一版加的，都在里面）：
 
@@ -163,7 +163,7 @@ Start-Process powershell -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Ex
 ## 五、跑一轮的最小清单
 
 1. 确认 Strata 服务在（只有模型脑才用得上：`http://127.0.0.1:11436/v1/chat/completions`）。
-2. 开牌桌：`python play.py --seat 1 --buddy 2 --agent 3 --trace`（或 `--resume`）。
+2. 开牌桌：`python play.py --new --seat 1 --buddy 2 --agent 3 --trace`（或直接 `python play.py` 接档）。
 3. 挂监听：`python seat_io.py wait --seat 3 --timeout 0 --json`，出现 pending 就按第〇节循环答。
 4. 自己坐 1 号打；轮到我（3 号）时我看 `pending.json` 自己落子，不让 `watch.py --brain fast/model` 替打。
 5. 打完看 `python seat_io.py trace -n 40` 复盘。
@@ -187,7 +187,7 @@ Start-Process powershell -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Ex
 | `players.py` | 四种座位玩家，`ExternalPlayer` 的收发就在这儿 |
 | `seat_io.py` | 接入位的命令行进出接口 |
 | `watch.py` | 自动脑/门铃；`fast`/`model` 自动打，`mine --cap 0` 只提醒不落子 |
-| `state.py` / `state.json` | 存档、`--resume` |
+| `state.py` / `state.json` | 存档、启动默认接档 |
 | `webui.py` / `webui.html` / `webui.js` | 网页 UI 适配层，进程内启动 `core.TableCore` |
 | `trace.jsonl` | 每步一行，复盘用 |
 | `规则.txt` / `牌友笔记.md` | 规则原文 / 牌友的长期笔记 |
@@ -236,7 +236,7 @@ cd 'd:\Users\C\Documents\Empty\Mahjong'
   --players "1=human,2=llm,3=external,4=random"
 
 # 接当前没打完的 state.json，同样要显式写 3 号，否则 3 号会按老 meta 变成随机
-& 'D:\Program Files\Python313\python.exe' webui.py --resume --no-open `
+& 'D:\Program Files\Python313\python.exe' webui.py --no-open `
   --players "1=human,2=llm,3=external,4=random"
 ```
 

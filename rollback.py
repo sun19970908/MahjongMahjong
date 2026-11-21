@@ -6,7 +6,7 @@
     python rollback.py --latest     # 恢复最近一帧
 
 恢复前会先把当前 state.json 备份成 state.before-rollback.json。
-恢复后运行 play.py --resume 接着打；别在牌桌进程还开着时恢复。
+恢复后运行 play.py 接着打；别在牌桌进程还开着时恢复。
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ def main() -> int:
     os.replace(tmp, STATE)
     print(f"已恢复：{p.parent.name}/{p.name}")
     print("当前 state.json 已备份到 state.before-rollback.json")
-    print("停掉牌桌进程后运行： python play.py --resume")
+    print("停掉牌桌进程后运行： python play.py")
     return 0
 
 

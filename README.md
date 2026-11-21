@@ -5,14 +5,17 @@
 ## 开一桌
 
 ```bash
-python play.py                                   # 你坐 1 号，牌友坐 2 号，其余随机
-python play.py --seat 2 --buddy 3 --agent 4      # 自己排座
-python play.py --players "1=human,2=llm,3=external,4=random"
-python play.py --dealer 2 --rounds 3             # 指定 2 号坐庄，连打 3 局（胡了连庄）
-python play.py --demo --offline                  # 不调模型，四家随机，只验画面
+python play.py                                   # 接当前 state.json
+python play.py --new                             # 新开一局：你坐 1 号，牌友坐 2 号，其余随机
+python play.py --new --seat 2 --buddy 3 --agent 4      # 自己排座
+python play.py --new --players "1=human,2=llm,3=external,4=random"
+python play.py --new --dealer 2 --rounds 3             # 指定 2 号坐庄，连打 3 局（胡了连庄）
+python play.py --new --demo --offline                  # 不调模型，四家随机，只验画面
 ```
 
 座位号一律从 **1** 起（命令行、TUI、`seats/seatN/` 目录、`state.json` 的 meta 都是）；引擎内部仍用 0 基下标，换算只走 `seats.label()/index()`。
+
+不带 `--new` 时默认接 `state.json`，座位以存档为准；`--new` 才按命令行重新排座。
 
 轮到你出牌时可以输入 `/p` 中场暂停，或 `/e` 提前结束这一场（当前局不结算，直接进终场聊天）；局间聊天里打 `/e` 也一样。
 
@@ -25,9 +28,8 @@ python board.py --watch 2        # 每 2 秒把 state.json 画成 桌面.html
 网页牌桌（浏览器里直接打 1 号）：
 
 ```bash
-python webui.py                  # 默认 1号网页、2号牌友、3/4随机；有未完成存档就接着打
-python webui.py --new            # 强制新开一桌
-python webui.py --resume         # 强制接当前 state.json
+python webui.py                  # 默认接 state.json；没有存档会报错
+python webui.py --new            # 新开一桌，不读存档
 python webui.py --debug          # 调试全牌：四家手牌直接显示在座位里，仅本地教学用
 python webui.py --port 8765      # 换端口
 ```
@@ -48,7 +50,7 @@ python rollback.py --to 42      # 回到第 42 步落子之前
 python rollback.py --latest     # 回到最近一帧
 ```
 
-恢复前会把当前 `state.json` 备份成 `state.before-rollback.json`；停掉牌桌进程后，再运行 `python play.py --resume` 接着打。
+恢复前会把当前 `state.json` 备份成 `state.before-rollback.json`；停掉牌桌进程后，再运行 `python play.py` 接着打。
 
 ## 玩家档案（`profiles/<名字>/profile.json`）
 
@@ -114,7 +116,7 @@ python seat_io.py wait    --seat 3 --timeout 60 --json
 - `牌友笔记.md`：长期笔记，只在**开桌**时读一次进顶部 system；一整场（`--rounds N`）的顶部提示词不变。
 - `临时笔记.md`：本局临时笔记，下一局开始清空；局中/局间聊天都能看见。
 - `长期笔记草稿.md`：整场追加的长期笔记草稿。局中、局间只能 `append` 进这里，不落 `牌友笔记.md`；全部局打完的散场聊天才并档，也只有这时能 `replace` 原文。改完是**下次开桌**生效。
-- 草稿和临时笔记都落盘，`--resume` 接存档时原样恢复。
+- 草稿和临时笔记都落盘，启动接存档时原样恢复。
 
 ## 自测
 
@@ -122,5 +124,5 @@ python seat_io.py wait    --seat 3 --timeout 60 --json
 python referee.py     # 规则用例
 python scoring.py     # 番种用例
 python game.py        # 状态机用例 + 30 局随机守恒（约 2–4 分钟）
-python play.py --offline --steps 60 --no-save   # 画面冒烟
+python play.py --new --offline --steps 60 --no-save   # 画面冒烟
 ```

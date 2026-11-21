@@ -373,7 +373,7 @@ def main() -> int:
     ap.add_argument("--no-color", action="store_true")
     ap.add_argument("--cache", action="store_true")
     ap.add_argument("--trace", action="store_true")
-    ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--new", action="store_true", help="新开一局；默认接 state.json")
     ap.add_argument("--no-chat", action="store_true")
     ap.add_argument("--no-save", action="store_true")
     args = ap.parse_args()
@@ -391,9 +391,16 @@ def main() -> int:
     ui = TuiUi(seat=args.seat, no_chat=args.no_chat)
     core = TableCore(cfg, ui)
     ui.bind(core)
-    if args.resume:
+    resume = not args.new
+    if resume:
         print(" 接上次存档……")
-    core.run_sync(resume=args.resume)
+    try:
+        core.run_sync(resume=resume)
+    except RuntimeError as exc:
+        if resume and "没有存档" in str(exc):
+            print(" 没有存档，用 --new 新开一局")
+            return 1
+        raise
     print(f"\n 牌友出牌 {core.summary()['llm_records']} 次，兜底 "
           f"{core.summary()['llm_fallback']} 次")
     if args.cache:
