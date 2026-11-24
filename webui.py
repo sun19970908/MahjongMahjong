@@ -26,12 +26,13 @@ from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import seats as seats_mod
 import save_store
+import seat_io
 from core import CoreConfig, TableCore
-from players import EndEarly
+from players import EndEarly, resolve_external_answer, write_atomic_json
 
 HERE = Path(__file__).resolve().parent
 STATE_PATH = HERE / "state.json"
@@ -380,6 +381,143 @@ class WebTable:
                 return {"ok": False, "message": str(exc)}
             return {"ok": True, "message": "已回退，牌局从这一手之前接上"}
 
+    # ---- external 座位只读/回写薄接口（严格限 external 座位，绝不暴露他家暗手） ----
+
+    def external_seat(self, seat_no: int):
+        with self.lock:
+            c = self.core
+            if c is None:
+                return None, None, 0, HTTPStatus.CONFLICT, "牌桌还没起来"
+            ep = c.external_seat(seat_no)
+            if ep is None:
+                return None, None, self._generation, HTTPStatus.FORBIDDEN, f"{seat_no}号不是 external 接入位"
+            return ep, ep.dir, self._generation, None, ""
+
+    def external_snapshot(self, seat_no: int, *, wait_sec: float = 0.0,
+                          include_chat: bool = False, include_events: bool = False,
+                          since_event: int | None = None) -> tuple[dict, HTTPStatus]:
+        ep, sdir, gen0, err_st, err_msg = self.external_seat(seat_no)
+        if ep is None:
+            return {"ok": False, "message": err_msg}, err_st
+
+        wait_sec = max(0.0, min(30.0, float(wait_sec or 0.0)))
+        deadline = time.monotonic() + wait_sec
+        last_touch = 0.0
+        existing = seat_io.read_events(seat_no)
+        max_seq = int(existing[-1]["seq"]) if existing else 0
+        if since_event is None:
+            cursor = max_seq
+            st0 = seat_io.seat_status(seat_no) or {}
+            # 若刚结束一局且尚未取走，未传 since_event 时也带回最近一条收局播报
+            if include_events and not seat_io.pending(seat_no) and st0.get("state") in ("awaiting_next", "finished"):
+                for ev in reversed(existing):
+                    if ev.get("type") in ("round_end", "match_end"):
+                        cursor = int(ev["seq"]) - 1
+                        break
+        else:
+            cursor = int(since_event)
+
+        while True:
+            if include_chat and time.monotonic() - last_touch >= 20.0:
+                seat_io.touch_chat_ready(seat_no)
+                last_touch = time.monotonic()
+
+            req = seat_io.pending(seat_no)
+            err = seat_io.last_error(seat_no)
+            st = seat_io.seat_status(seat_no)
+            cp = seat_io.chat_pending(seat_no) if include_chat else None
+            evs = seat_io.read_events(seat_no, since=cursor) if include_events else []
+            ev_seq = int(evs[-1]["seq"]) if evs else max_seq
+
+            if req or cp or evs or err or time.monotonic() >= deadline:
+                with self.lock:
+                    c = self.core
+                    tbl = c.public_progress() if c is not None else None
+                return {
+                    "ok": True,
+                    "seat": seat_no,
+                    "status": st,
+                    "table": tbl,
+                    "pending": req,
+                    "chat": cp,
+                    "error": err,
+                    "events": evs,
+                    "event_seq": ev_seq,
+                }, HTTPStatus.OK
+
+            with self.lock:
+                cur_gen = self._generation
+                c = self.core
+                alive = c is not None and not c._finished and not c._stop.is_set()
+                tbl_end = c.public_progress() if (c is not None and (cur_gen != gen0 or not alive)) else None
+            if cur_gen != gen0 or not alive:
+                evs_end = seat_io.read_events(seat_no, since=cursor) if include_events else []
+                return {
+                    "ok": True,
+                    "seat": seat_no,
+                    "status": seat_io.seat_status(seat_no),
+                    "table": tbl_end,
+                    "pending": None,
+                    "chat": None,
+                    "error": None,
+                    "events": evs_end,
+                    "event_seq": int(evs_end[-1]["seq"]) if evs_end else max_seq,
+                }, HTTPStatus.OK
+            time.sleep(0.1)
+
+    def external_answer(self, seat_no: int, body: dict) -> tuple[dict, HTTPStatus]:
+        ep, sdir, _, err_st, err_msg = self.external_seat(seat_no)
+        if ep is None:
+            return {"ok": False, "message": err_msg}, err_st
+
+        req = seat_io.pending(seat_no)
+        if not req:
+            return {"ok": False, "message": "当前没有等待落子的 pending",
+                    "status": seat_io.seat_status(seat_no)}, HTTPStatus.CONFLICT
+
+        expected_round = int(req.get("round") or 0)
+        if body.get("round") is None:
+            body = {**body, "round": expected_round}
+        matched, is_pause, say, err = resolve_external_answer(
+            body, req.get("legal") or [], expected_round=expected_round)
+        if err or matched is None:
+            return {"ok": False, "message": err or "动作无效"}, HTTPStatus.BAD_REQUEST
+
+        ok, reject_err = seat_io.submit_and_confirm(
+            seat_no,
+            {"round": expected_round, "action": matched, "say": say},
+            expected_round=expected_round,
+            timeout=0.8,
+        )
+        if not ok:
+            return {"ok": False, "message": reject_err or "引擎拒绝"}, HTTPStatus.BAD_REQUEST
+        return {"ok": True, "round": expected_round, "pause": is_pause,
+                "action": matched, "say": say}, HTTPStatus.OK
+
+    def external_give_up(self, seat_no: int) -> tuple[dict, HTTPStatus]:
+        ep, sdir, _, err_st, err_msg = self.external_seat(seat_no)
+        if ep is None:
+            return {"ok": False, "message": err_msg}, err_st
+        (sdir / "give-up").write_text("", encoding="utf-8")
+        return {"ok": True, "message": "已交由随机代打这一手"}, HTTPStatus.OK
+
+    def external_chat_reply(self, seat_no: int, body: dict) -> tuple[dict, HTTPStatus]:
+        ep, sdir, _, err_st, err_msg = self.external_seat(seat_no)
+        if ep is None:
+            return {"ok": False, "message": err_msg}, err_st
+        text = str(body.get("text") or body.get("reply") or "").strip()
+        if not text:
+            return {"ok": False, "message": "回复内容不能为空"}, HTTPStatus.BAD_REQUEST
+        seat_io.touch_chat_ready(seat_no)
+        cp = seat_io.chat_pending(seat_no)
+        payload = {"text": text, "at": time.strftime("%H:%M:%S")}
+        if body.get("id") is not None:
+            payload["id"] = body.get("id")
+        elif cp and cp.get("id"):
+            payload["id"] = cp["id"]
+        write_atomic_json(sdir / "chat_answer.json", payload)
+        return {"ok": True, "text": text}, HTTPStatus.OK
+
 
 class Handler(BaseHTTPRequestHandler):
     table: WebTable
@@ -411,8 +549,67 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             return {}
 
+    def _parse_seat_route(self, path: str) -> tuple[int, str] | None:
+        if not path.startswith("/api/seat/"):
+            return None
+        parts = path[len("/api/seat/"):].split("/", 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            return None
+        seat_no = int(parts[0])
+        if not 1 <= seat_no <= 4:
+            return None
+        return seat_no, parts[1]
+
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        seat_route = self._parse_seat_route(path)
+        if seat_route is not None:
+            seat_no, action = seat_route
+            qs = parse_qs(parsed.query)
+            if action == "status":
+                snap, st = self.table.external_snapshot(seat_no, include_chat=True, include_events=True, since_event=0)
+                if snap.get("ok") and snap.get("events"):
+                    snap["events"] = snap["events"][-5:]
+                self._json(snap, st)
+                return
+            if action == "pending":
+                def _q_bool(name: str) -> bool:
+                    v = (qs.get(name) or ["0"])[0].lower()
+                    return v in ("1", "true", "yes", "on")
+                try:
+                    wait_sec = float((qs.get("wait") or ["0"])[0])
+                except ValueError:
+                    wait_sec = 0.0
+                try:
+                    raw_since = (qs.get("since_event") or [None])[0]
+                    since_ev = int(raw_since) if raw_since is not None else None
+                except ValueError:
+                    since_ev = None
+                snap, st = self.table.external_snapshot(
+                    seat_no,
+                    wait_sec=wait_sec,
+                    include_chat=_q_bool("include_chat") or _q_bool("chat"),
+                    include_events=_q_bool("include_events") or _q_bool("events"),
+                    since_event=since_ev,
+                )
+                self._json(snap, st)
+                return
+            if action == "events":
+                ep, _, _, err_st, err_msg = self.table.external_seat(seat_no)
+                if ep is None:
+                    self._json({"ok": False, "message": err_msg}, err_st)
+                    return
+                try:
+                    since = int((qs.get("since") or ["0"])[0])
+                    limit = int((qs.get("limit") or ["50"])[0])
+                except ValueError:
+                    since, limit = 0, 50
+                self._json({"ok": True, "seat": seat_no,
+                            "events": seat_io.read_events(seat_no, since=since, limit=limit)})
+                return
+            self._json({"ok": False, "message": "not found"}, HTTPStatus.NOT_FOUND)
+            return
         if path == "/api/state":
             self._json(self.table.state(debug=self.debug))
             return
@@ -449,6 +646,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         body = self._body()
+        seat_route = self._parse_seat_route(path)
+        if seat_route is not None:
+            seat_no, action = seat_route
+            if action == "answer":
+                resp, st = self.table.external_answer(seat_no, body)
+                self._json(resp, st)
+                return
+            if action == "give-up":
+                resp, st = self.table.external_give_up(seat_no)
+                self._json(resp, st)
+                return
+            if action == "chat-reply":
+                resp, st = self.table.external_chat_reply(seat_no, body)
+                self._json(resp, st)
+                return
+            self._json({"ok": False, "message": "not found"}, HTTPStatus.NOT_FOUND)
+            return
         if path == "/api/action":
             try:
                 idx = int(body.get("index"))

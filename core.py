@@ -19,7 +19,7 @@ from typing import Any, Protocol
 
 import seats as seats_mod
 import state as state_mod
-from game import Action, Decision, Game, GameConfig
+from game import Action, Decision, Event, Game, GameConfig
 from llm_player import LLMPlayer, StrataClient
 from players import (
     BasePlayer,
@@ -30,11 +30,21 @@ from players import (
     SeatPlan,
     Table,
     Tracer,
+    action_label,
     build_players,
     parse_players,
     plan_from_flags,
+    tile_label,
 )
-from referee import melds_from_ids, parse_tile, tile_id, tile_name, ting_hint_lines
+from referee import (
+    COPIES,
+    counts_from,
+    melds_from_ids,
+    parse_tile,
+    tile_id,
+    tile_name,
+    ting_hint_lines,
+)
 
 ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / "state.json"
@@ -136,36 +146,99 @@ class LocalSeat(BasePlayer):
 # ---------------------------------------------------------------- 小工具
 
 
-def tile_label(tid: str | None) -> str:
-    if not tid:
-        return "?"
-    if tid == "z5":
-        return "红中"
-    if len(tid) == 2 and tid[0] in SUIT and tid[1].isdigit():
-        return f"{tid[1]}{SUIT[tid[0]]}"
-    return str(tid)
+def _format_event_for_seat(e, viewer_seat: int | None) -> str:
+    """把单条牌桌事件格式化给指定座位看（严守信息隔离：绝不泄露出别家摸了什么牌）。"""
+    t = e.type
+    name = tile_label(tile_id(e.tile)) if e.tile is not None else ""
+    label = seats_mod.label(e.seat) if e.seat is not None else "?"
+    is_me = viewer_seat is not None and e.seat == viewer_seat
+    if t == "draw":
+        return f"你摸到 {name}" if is_me else f"{label}号 摸牌"
+    if t == "kan_draw":
+        return f"你补张 {name}" if is_me else f"{label}号 补张"
+    if t == "discard":
+        return f"{label}号 打 {name}"
+    if t == "pon":
+        return f"{label}号 碰 {name}"
+    if t == "chi":
+        return f"{label}号 吃 " + "+".join(tile_label(x) for x in e.data.get("use", []))
+    if t == "kan":
+        klabel = {"in_hand": "明杠", "added": "加杠"}.get((e.data or {}).get("kind"), "杠")
+        return f"{label}号 {klabel} {name}"
+    if t == "ting":
+        return f"{label}号 报听"
+    if t == "bloom":
+        return f"{label}号 后开花 {name}"
+    if t == "dead":
+        return f"{label}号 放过胡，本局不准再胡"
+    if t == "win":
+        tag = "抢杠" if (e.data or {}).get("rob") else ("后开花" if (e.data or {}).get("bloom") else "")
+        return f"*** {label}号 {tag}胡了！"
+    if t == "draw_game":
+        return "*** 荒庄：牌墙摸空"
+    if t == "say":
+        txt = str((e.data or {}).get("text") or "").strip()
+        return f'{label}号 说："{txt}"' if txt else ""
+    return ""
 
 
-def action_label(a: dict) -> str:
-    kind = str(a.get("kind") or "")
-    tile = tile_label(a.get("tile"))
-    if kind == "discard":
-        return f"打 {tile}"
-    if kind == "pon":
-        return f"碰 {tile}"
-    if kind == "kan":
-        label = "加杠" if (a.get("meta") or {}).get("kind") == "added" else "杠"
-        return f"{label} {tile}"
-    if kind == "chi":
-        combo = a.get("combo") or []
-        return "吃 " + "+".join(tile_label(t) for t in combo)
-    return {
-        "win": "胡",
-        "bloom": "后开花",
-        "pass": "过",
-        "draw": "摸牌",
-        "ting": "报听",
-    }.get(kind, kind or "?")
+def _compute_ting_hints(referee, view: dict, legal) -> list[dict]:
+    """计算打哪张牌可合法单钓、以及按公开信息牌面还剩几张（供网页与接入位共用）。"""
+    seat_idx = view.get("seat")
+    ting_map = view.get("ting") or {}
+    if ting_map.get(seat_idx) or ting_map.get(str(seat_idx)):
+        return []
+    discards = [a.tile for a in (legal or []) if a.kind == "discard" and a.tile is not None]
+    if not discards:
+        return []
+    hand = list(view.get("hand") or [])
+    try:
+        fixed = melds_from_ids(view.get("fixed") or [])
+        raw = referee.discard_ting_hints(hand, fixed, discards)
+    except Exception:
+        return []
+    if not raw:
+        return []
+    try:
+        hand_counts = list(counts_from(hand))
+        pub_counts = [0] * len(hand_counts)
+        for ms in (view.get("melds") or {}).values():
+            for meld in ms or ():
+                tiles = meld.get("tiles") if isinstance(meld, dict) else meld
+                for tid in tiles or ():
+                    pub_counts[parse_tile(tid)] += 1
+        for ds in (view.get("discards") or {}).values():
+            for tid in ds or ():
+                pub_counts[parse_tile(tid)] += 1
+    except Exception:
+        hand_counts = None
+        pub_counts = None
+
+    pick_by_tile = {
+        a.tile: idx for idx, a in enumerate(legal, 1)
+        if a.kind == "discard" and a.tile is not None
+    }
+    lines = ting_hint_lines(raw)
+    out = []
+    for h, line in zip(raw, lines):
+        dt = h["tile"]
+        waits = list(h.get("waits") or [])
+        left_list = []
+        if hand_counts is not None and pub_counts is not None:
+            for w in waits:
+                in_hand_after = max(0, hand_counts[w] - (1 if w == dt else 0))
+                left_list.append(max(0, COPIES - pub_counts[w] - in_hand_after))
+        suffix = f"（外剩{'/'.join(str(x) for x in left_list)}张）" if left_list else ""
+        out.append({
+            "pick": pick_by_tile.get(dt),
+            "tile": tile_id(dt),
+            "tile_name": tile_name(dt),
+            "waits": [tile_id(w) for w in waits],
+            "wait_names": [tile_name(w) for w in waits],
+            "left_public": left_list,
+            "text": line + suffix,
+        })
+    return out
 
 
 def seat_no(value) -> int | None:
@@ -283,6 +356,10 @@ class TableCore:
         self._waiting_seat: int | None = None
         self._waiting_since: float | None = None
         self._waiting_seconds = 0.0
+        self._turn_seat: int | None = None
+        self._turn_kind: str = ""
+        self._turn_decision: str = ""
+        self._turn_since: float | None = None
 
         self.game: Game | None = None
         self.table: Table | None = None
@@ -316,6 +393,8 @@ class TableCore:
         self._broadcast = ""
         self._auto_reply = ""
         self._ready = threading.Event()
+        self._ext_events: list = []
+        self._ext_cursors: dict[int, int] = {}
 
     @property
     def context_round(self) -> int:
@@ -366,6 +445,7 @@ class TableCore:
                 }
                 self._round_info = info
                 self._safe_persist_locked()
+            self._emit_external_round_end(info, None, True)
             try:
                 self.ui.round_end(self, info)
             except Exception:
@@ -381,6 +461,13 @@ class TableCore:
             with self.lock:
                 self._running = False
                 self._ready.set()
+                end_state = "finished" if self._finished else ("interrupted" if self._interrupted else "stopped")
+            if self.table and not self._awaiting_next:
+                for p in self.table.of_kind("external"):
+                    try:
+                        p.cleanup(state=end_state)
+                    except Exception:
+                        pass
             if not self._stop.is_set():
                 self._safe_persist()
 
@@ -395,6 +482,13 @@ class TableCore:
             t.join(timeout=2.0)
         with self.lock:
             self._running = False
+            table = self.table
+        if table:
+            for p in table.of_kind("external"):
+                try:
+                    p.cleanup(state="stopped")
+                except Exception:
+                    pass
         return self.status()
 
     def status(self) -> dict:
@@ -453,7 +547,31 @@ class TableCore:
             self._round_started_at = str(meta.get("round_started_at") or "")
             self._build_table(meta=meta)
             self._restore_llm(meta)
-            if game.result is not None or game.phase == "ended":
+            self._ext_events.clear()
+            self._ext_cursors.clear()
+            ended = game.result is not None or game.phase == "ended"
+            if self.table:
+                ext_rounds = meta.get("ext_rounds") or {}
+                for p in self.table.of_kind("external"):
+                    try:
+                        prev_r = int(ext_rounds.get(str(p.seat), ext_rounds.get(p.seat, 0)) or 0)
+                        if prev_r > 0:
+                            p.round = prev_r
+                    except (TypeError, ValueError):
+                        pass
+                    p.begin_session(self.run_id, reset_events=False,
+                                    game_round=self.round, lap=self.lap, steps=self.steps)
+                    if ended:
+                        p.set_status("finished", game_round=self.round, lap=self.lap, steps=self.steps)
+                    else:
+                        p.emit_event("resumed", {
+                            "game_round": self.round,
+                            "lap": int(self.lap),
+                            "dealer": seats_mod.label(self.game.dealer),
+                            "board": {str(s + 1): int(self.board.get(s, 0)) for s in range(4)},
+                            "names": {str(s + 1): self.names.get(s, f"{s + 1}号") for s in range(4)},
+                        })
+            if ended:
                 self._finished = True
                 self._last_result = game.result
                 self._broadcast = str(meta.get("broadcast") or "")
@@ -494,6 +612,19 @@ class TableCore:
         self.log.append(f"—— 第 1 局：{seats_mod.label(self.game.dealer)} 号坐庄 ——")
         for p in self.table.of_kind("llm"):
             p.impl.reset_temp_notes()
+        self._ext_events.clear()
+        self._ext_cursors.clear()
+        for p in self.table.of_kind("external"):
+            p.begin_session(self.run_id, reset_events=True,
+                            game_round=self.round, lap=self.lap, steps=0)
+            p.emit_event("round_start", {
+                "game_round": self.round,
+                "lap": int(self.lap),
+                "dealer": seats_mod.label(self.game.dealer),
+                "dice": None if self.game.dice is None else [self.game.dice.a, self.game.dice.b, self.game.dice.total],
+                "board": {str(s + 1): int(self.board.get(s, 0)) for s in range(4)},
+                "names": {str(s + 1): self.names.get(s, f"{s + 1}号") for s in range(4)},
+            })
         self._safe_persist()
 
     def _make_plans(self) -> list[SeatPlan]:
@@ -680,10 +811,43 @@ class TableCore:
             if isinstance(p, LLMSeat):
                 d.view = self._llm_view(d.view)
             if isinstance(p, ExternalPlayer):
+                d.view = self._llm_view(d.view)
+                with self.lock:
+                    cur = self._ext_cursors.get(d.seat, 0)
+                    raw_ev = self._ext_events[cur:]
+                    self._ext_cursors[d.seat] = len(self._ext_events)
+                    table_meta = {
+                        "run_id": self.run_id,
+                        "round": int(self.round),
+                        "lap": int(self.lap),
+                        "steps": int(self.steps),
+                        "dealer": seats_mod.label(self.game.dealer) if self.game else None,
+                        "board": {str(s + 1): int(self.board.get(s, 0)) for s in range(4)},
+                        "names": {str(s + 1): self.names.get(s, f"{s + 1}号") for s in range(4)},
+                        "said": {str(k + 1): v for k, v in self.said.items() if str(v).strip()},
+                    }
+                recent_events = [txt for txt in (_format_event_for_seat(ev, d.seat) for ev in raw_ev) if txt]
+                ting_hints = _compute_ting_hints(self.game.r, d.view, d.legal) if d.kind == "discard" else []
+                p.set_turn_context(table=table_meta, ting_hints=ting_hints, recent_events=recent_events)
                 p.on_wait = self._on_external_wait
                 with self.lock:
                     self._waiting_seat = d.seat
                     self._waiting_since = time.monotonic()
+            elif p.kind in ("human", "llm") and self.table and self.table.of_kind("external"):
+                wait_info = {
+                    "seat": seats_mod.label(d.seat),
+                    "name": self.names.get(d.seat, f"{d.seat + 1}号"),
+                    "kind": p.kind,
+                    "decision": d.kind,
+                }
+                for ep in self.table.of_kind("external"):
+                    ep.set_status("playing", game_round=self.round, lap=self.lap,
+                                  steps=self.steps, waiting_on=wait_info)
+            with self.lock:
+                self._turn_seat = d.seat
+                self._turn_kind = p.kind
+                self._turn_decision = d.kind
+                self._turn_since = time.monotonic()
             t0 = time.time()
             try:
                 act, speech = p.decide(d)
@@ -692,6 +856,10 @@ class TableCore:
                     self._waiting_seat = None
                     self._waiting_since = None
                     self._waiting_seconds = 0.0
+                    self._turn_seat = None
+                    self._turn_kind = ""
+                    self._turn_decision = ""
+                    self._turn_since = None
                     self.pending_decision = None
             took = time.time() - t0
 
@@ -699,24 +867,32 @@ class TableCore:
                 return
 
             if speech and speech.strip():
+                clean_speech = speech.strip()
                 with self.lock:
-                    self.said[d.seat] = speech.strip()
+                    self.said[d.seat] = clean_speech
+                    self._ext_events.append(Event("say", seat=d.seat, data={"text": clean_speech}))
+                    del self._ext_events[:-300]
 
             if act is None:                         # 要求中场暂停
                 with self.lock:
                     self.log.append("牌先停着")
                     self._paused = True
+                    ext_players = list(self.table.of_kind("external")) if self.table else []
                 opener = speech
                 actor = p.name
                 if opener:
                     with self.lock:
                         self.chat_messages.append({"role": "buddy", "phase": "pause", "text": str(opener)})
                         self._safe_persist_locked()
+                for ep in ext_players:
+                    ep.set_status("paused", game_round=self.round, lap=self.lap, steps=self.steps)
                 try:
                     self.ui.pause(self, actor, opener)
                 finally:
                     with self.lock:
                         self._paused = False
+                    for ep in ext_players:
+                        ep.set_status("playing", game_round=self.round, lap=self.lap, steps=self.steps)
                 continue
 
             with self.lock:
@@ -867,6 +1043,8 @@ class TableCore:
             self._finished = bool(last)
             self._safe_persist_locked()
 
+        self._emit_external_round_end(info, res, last)
+
         # 局末不自动找牌友说话；由用户选座位、发第一句时才把播报交给对方。
         if self._ended_early or self._stopped_by_limit:
             try:
@@ -885,6 +1063,7 @@ class TableCore:
                 with self.lock:
                     self._ended_early = True
                     self._finished = True
+                self._emit_external_match_end(info)
                 return False
             except Exception as exc:
                 with self.lock:
@@ -895,6 +1074,7 @@ class TableCore:
         if not reply:
             with self.lock:
                 self._finished = True
+            self._emit_external_match_end(info)
             return False
 
         # 下一局：局间聊天（包括改长期笔记）已经结束，这里才做上下文窗口判断。
@@ -939,6 +1119,18 @@ class TableCore:
         if self.table:
             for p in self.table.of_kind("llm"):
                 p.impl.reset_temp_notes()
+            self._ext_events.clear()
+            self._ext_cursors.clear()
+            for p in self.table.of_kind("external"):
+                p.set_status("playing", game_round=self.round, lap=self.lap, steps=0)
+                p.emit_event("round_start", {
+                    "game_round": self.round,
+                    "lap": int(self.lap),
+                    "dealer": seats_mod.label(self.game.dealer),
+                    "dice": None if self.game.dice is None else [self.game.dice.a, self.game.dice.b, self.game.dice.total],
+                    "board": {str(s + 1): int(self.board.get(s, 0)) for s in range(4)},
+                    "names": {str(s + 1): self.names.get(s, f"{s + 1}号") for s in range(4)},
+                })
         self._safe_persist_locked()
 
     def _reset_llm_contexts(self) -> None:
@@ -989,6 +1181,9 @@ class TableCore:
             "agent_wait": self.cfg.agent_wait,
             "step_limit": self.cfg.steps,
             "plans": [{"seat": p.seat, "kind": p.kind, "options": p.options} for p in self.plans],
+            "ext_rounds": {} if not self.table else {
+                str(p.seat): int(p.round) for p in self.table.of_kind("external")
+            },
             "llms": [] if not self.table else [
                 {"seat": p.seat, **p.impl.context_state()}
                 for p in self.table.of_kind("llm")
@@ -1330,24 +1525,11 @@ class TableCore:
                 rec["label"] = action_label(rec)
                 actions.append(rec)
 
-            ting_hints = []
-            if (d is not None and d.seat == own_idx and d.kind == "discard"
-                    and not (view.get("ting") or {}).get(own_idx)):
-                try:
-                    fixed = melds_from_ids(view.get("fixed") or [])
-                    discards = [a.tile for a in d.legal
-                                if a.kind == "discard" and a.tile is not None]
-                    raw = self.game.r.discard_ting_hints(view.get("hand") or [], fixed, discards)
-                    lines = ting_hint_lines(raw)
-                    ting_hints = [{
-                        "tile": tile_id(h["tile"]),
-                        "tile_name": tile_name(h["tile"]),
-                        "waits": [tile_id(w) for w in h["waits"]],
-                        "wait_names": [tile_name(w) for w in h["waits"]],
-                        "text": line,
-                    } for h, line in zip(raw, lines)]
-                except Exception:
-                    ting_hints = []
+            ting_hints = (
+                _compute_ting_hints(self.game.r, view, d.legal)
+                if (d is not None and d.seat == own_idx and d.kind == "discard")
+                else []
+            )
 
             said = []
             for k, v in sorted(self.said.items()):
@@ -1451,42 +1633,88 @@ class TableCore:
                 "cache_report": self.llm.impl.cache_report() if self.llm and self.cfg.cache else "",
             }
 
-    # ---------- 事件日志 ----------
+    # ---------- 供外部访问 & 事件日志 ----------
+
+    def public_progress(self) -> dict:
+        """面向外部座位的非作弊桌况：只含进度、暂停状态与当前在等谁。"""
+        with self.lock:
+            waiting = None
+            if self._turn_seat is not None:
+                elapsed = 0.0
+                if self._turn_since is not None:
+                    elapsed = max(0.0, time.monotonic() - self._turn_since)
+                waiting = {
+                    "seat": seats_mod.label(self._turn_seat),
+                    "name": self.names.get(self._turn_seat, f"{self._turn_seat + 1}号"),
+                    "kind": self._turn_kind,
+                    "decision": self._turn_decision,
+                    "seconds": round(elapsed, 1),
+                }
+            return {
+                "run_id": self.run_id,
+                "running": bool(self._running and self._thread and self._thread.is_alive()) if self._thread else bool(self._running),
+                "finished": bool(self._finished),
+                "paused": bool(self._paused),
+                "awaiting_next": bool(self._awaiting_next),
+                "interrupted": bool(self._interrupted),
+                "error": self._error,
+                "round": int(self.round),
+                "lap": int(self.lap),
+                "steps": int(self.steps),
+                "dealer": seats_mod.label(self.game.dealer) if self.game else None,
+                "board": {str(s + 1): int(self.board.get(s, 0)) for s in range(4)},
+                "waiting": waiting,
+            }
+
+    def external_seat(self, seat_no_1based: int) -> ExternalPlayer | None:
+        if not self.table or not (1 <= int(seat_no_1based) <= 4):
+            return None
+        p = self.table.at(seats_mod.index(int(seat_no_1based), 4))
+        return p if isinstance(p, ExternalPlayer) else None
+
+    def _emit_external_match_end(self, info: dict) -> None:
+        with self.lock:
+            ext_players = list(self.table.of_kind("external")) if self.table else []
+            ext_names = {str(s + 1): self.names.get(s, f"{s + 1}号") for s in range(4)}
+        board = info.get("board") or {str(s + 1): int(self.board.get(s, 0)) for s in range(4)}
+        for ep in ext_players:
+            ep.emit_event("match_end", {
+                "game_round": info["round"],
+                "board": board,
+                "names": ext_names,
+            })
+            ep.cleanup(state="finished")
+
+    def _emit_external_round_end(self, info: dict, res: dict | None, last: bool) -> None:
+        with self.lock:
+            ext_players = list(self.table.of_kind("external")) if self.table else []
+            ext_names = {str(s + 1): self.names.get(s, f"{s + 1}号") for s in range(4)}
+            ended_early = bool(self._ended_early)
+        for ep in ext_players:
+            ep.emit_event("round_end", {
+                "game_round": info["round"],
+                "lap": info.get("lap", int(self.lap)),
+                "steps": info.get("steps", int(self.steps)),
+                "last": bool(last),
+                "ended_early": ended_early,
+                "broadcast": make_broadcast(
+                    self.round, res or {}, self.board, ep.seat - 1, ended_early),
+                "result": info.get("result"),
+                "board": info.get("board") or {str(s + 1): int(self.board.get(s, 0)) for s in range(4)},
+                "names": ext_names,
+            })
+            if not last:
+                ep.set_status("awaiting_next", game_round=info["round"],
+                              lap=info.get("lap", int(self.lap)), steps=info.get("steps", int(self.steps)))
+        if last:
+            self._emit_external_match_end(info)
 
     def _note_events(self, events) -> None:
         mine = self.me
         for e in events:
-            t = e.type
-            name = tile_label(tile_id(e.tile)) if e.tile is not None else ""
-            if t == "draw":
-                if e.seat == mine:
-                    self.log.append(f"你摸到 {name}")
-                else:
-                    self.log.append(f"{seats_mod.label(e.seat)}号 摸牌")
-            elif t == "kan_draw":
-                if e.seat == mine:
-                    self.log.append(f"你补张 {name}")
-                else:
-                    self.log.append(f"{seats_mod.label(e.seat)}号 补张")
-            elif t == "discard":
-                self.log.append(f"{seats_mod.label(e.seat)}号 打 {name}")
-            elif t == "pon":
-                self.log.append(f"{seats_mod.label(e.seat)}号 碰 {name}")
-            elif t == "chi":
-                self.log.append(f"{seats_mod.label(e.seat)}号 吃 " + "+".join(
-                    tile_label(x) for x in e.data.get("use", [])))
-            elif t == "kan":
-                label = {"in_hand": "明杠", "added": "加杠"}.get((e.data or {}).get("kind"), "杠")
-                self.log.append(f"{seats_mod.label(e.seat)}号 {label} {name}")
-            elif t == "ting":
-                self.log.append(f"{seats_mod.label(e.seat)}号 报听")
-            elif t == "bloom":
-                self.log.append(f"{seats_mod.label(e.seat)}号 后开花 {name}")
-            elif t == "dead":
-                self.log.append(f"{seats_mod.label(e.seat)}号 放过胡，本局不准再胡")
-            elif t == "win":
-                tag = "抢杠" if (e.data or {}).get("rob") else ("后开花" if (e.data or {}).get("bloom") else "")
-                self.log.append(f"*** {seats_mod.label(e.seat)}号 {tag}胡了！")
-            elif t == "draw_game":
-                self.log.append("*** 荒庄：牌墙摸空")
+            self._ext_events.append(e)
+            line = _format_event_for_seat(e, mine)
+            if line:
+                self.log.append(line)
         del self.log[:-30]
+        del self._ext_events[:-300]

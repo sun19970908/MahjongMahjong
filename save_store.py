@@ -104,7 +104,7 @@ def _players(meta: dict) -> list[dict]:
             if kind == "human":
                 name = f"{seat}号（你）"
             elif kind == "external":
-                name = f"{seat}号（接入）"
+                name = f"{profile}（{seat}号）" if profile else f"{seat}号（接入）"
             elif profile:
                 name = f"{profile}（{seat}号）"
             else:

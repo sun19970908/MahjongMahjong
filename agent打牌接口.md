@@ -14,19 +14,19 @@
 正确循环（座位号按当前桌换，下面以 1 号为例）：
 
 ```powershell
-# 1. 阻塞等 1 号 pending；超时 0 = 一直等
-& 'D:\Program Files\Python313\python.exe' seat_io.py wait --seat 1 --timeout 0 --json
+# 1. 阻塞等 1 号 pending（可顺带拉增量事件与聊天通知）；超时 0 = 一直等
+& 'D:\Program Files\Python313\python.exe' seat_io.py wait --seat 1 --timeout 0 --include-events --include-chat --json
 
-# 2. 从返回 JSON 的 legal 里选一个，优先 --pick N（保留 meta）
-& 'D:\Program Files\Python313\python.exe' seat_io.py answer --seat 1 --pick 3 --say "…"
+# 2. 从返回 JSON 的 legal 里选一个，推荐 --pick N（也可按牌名/组合选）；加 --wait 可当场校验并顺带等下一手
+& 'D:\Program Files\Python313\python.exe' seat_io.py answer --seat 1 --pick 3 --say "…" --wait
 ```
 
 要点：
 
-- 每答完一手，**马上再 `wait`**；答完就停，就是没监听。
-- `wait` 返回 `timeout`，说明还没轮到这张座位（牌桌在等别人），继续等，不要乱答。
-- 加杠、明杠、后开花一定用 `--pick N`；自己拼 `--kind` 会丢 `meta`。
-- 只看 `pending.view`，不要读 `state.json` 里的 `hands`；那会看到别家手牌。
+- 每答完一手，**马上再 `wait`**（或直接用 `answer --wait`）；答完就停，就是没监听。
+- `wait` 返回 `timeout`，说明还没轮到这张座位（牌桌在等别人），继续等，不要乱答；`error.json` 有错会快速报错返回。
+- 仍推荐用 `--pick N`；若用 `--kind` 且在当前 `legal` 里唯一（或仅 `meta` 唯一），引擎会自动补齐 `meta`，支持 `7饼` 等中文牌名。
+- 只看 `pending.view` / `pending.json`，不要读 `state.json` 里的 `hands`；那会看到别家手牌。
 - 要挂后台进程，只能挂“只读提醒”，真正落子仍由我按 pending 手动作答；不要让 `watch.py --brain mine` 的“保底”替打。
 
 ## 一、四个人是谁
@@ -73,28 +73,42 @@ python board.py --watch 2          # 每 2 秒读 state.json 重画 桌面.html
 想换成真牌面贴图：把 `tiles/<牌名>.png`（m1…m9 / p1…p9 / s1…s9 / z5）丢进 `tiles/`，`board.py` 自动改用图片，没图就文字画。
 
 
-## 二、接入位（3 号）的协议：只用文件，不占端口
+## 二、接入位（3 号）的协议：文件协议 + WebUI HTTP 适配
+
+支持自定义显示名：`--players "1=human,2=llm,3=external:桌宠小鲸,4=random"`（显示为 `桌宠小鲸（3号）`）。
 
 目录：`seats/seat3/`（`players.DEFAULT_SEAT_ROOT` = 项目根下的 `seats`）
 
-- `pending.json`：引擎写的「这一手轮到你」，里面有 `round`、`seat`、`kind`（`draw / discard / react / kan_draw / ting_declare`）、`view`（我自己的手牌 + 牌桌 + 牌河）、`legal`（这一手能做的动作，带 `meta`）。
-- `answer.json`：我写回去，格式 `{"round": 同一个数, "action": {...}, "say": "..."}`。
-- `round` 对不上就等于没答，引擎会一直等（`--agent-wait 0` 是死等）。
-- 想弃这一手交给随机：往 `seats/seat3/give-up` 写个空文件。
+- `pending.json`：引擎写的「这一手轮到你」，字段自包含：
+  - `round` / `seat` / `name` / `kind` / `forced`
+  - `table`：桌况元信息（`run_id` / `round` / `lap` / `steps` / `dealer` / `board` / `names` / `said`）
+  - `view`：自己的公开+私有视角（不含别家手牌，含公开牌河、副露、`ting` 标记、公共事件日志与近期聊天）
+  - `legal`：合法动作列表，每项自带 1 基 `pick`、中文 `label`、中文牌名 `name` 和 `meta`
+  - `ting_hints`：出牌阶段直接算好的听牌提示（含听张与 `left_public` 公开余张数）
+  - `recent_events`：经当前座位公开视角过滤后的增量事件（含出牌动作与桌面 `--say` 发言，绝不泄露他家暗摸）
+- `answer.json`：写回动作，支持两种写法：
+  - 推荐直接选下标：`{"round": 同一个数, "pick": 3, "say": "..."}`（引擎按 `legal` 补全 `action` 与 `meta`）
+  - 或写动作对象：`{"round": 同一个数, "action": {"kind": "discard", "tile": "7饼"}, "say": "..."}`（支持中文牌名，唯一 `meta` 自动补齐）
+- `error.json`：回传若被拒绝（如 `round` 不匹配、动作非法、`meta` 冲突），引擎会立刻写入 `error.json`，不再静默空转。
+- `status.json`：座位生命周期状态（`playing` / `waiting_decision` / `chatting` / `paused` / `awaiting_next` / `finished` / `stopped` / `interrupted`）与当前在等谁 `waiting_on`；停桌/终局会自动清理陈旧 `pending.json`。
+- `events.jsonl`：持久化生命周期与桌面事件流（`round_start`、`round_end`、`match_end`、`resumed` 等）。
+- `chat_pending.json` / `chat_answer.json`：暂停/局间聊天、喊话接话时的外部应答协议（配合 `chat_ready.json` 或 `talk_in/out.jsonl`）。
+- `give-up`：写个空文件可把这一手交给随机托管。
 
-## 三、手动答一手
+## 三、手动答一手 / CLI 常用命令
 
 ```bash
-python seat_io.py pending --seat 3            # 现在轮到我了吗，没有就打印 none
-python seat_io.py wait    --seat 3 --timeout 600
-python seat_io.py answer  --seat 3 --pick 3 --say "打这张"     # 直接选第 3 个选项，meta 一起带
-python seat_io.py answer  --seat 3 --kind discard --tile m3
-python seat_io.py answer  --seat 3 --kind chi --combo s4+s6
+python seat_io.py status  --seat 3            # 座位状态、是否在等动作/聊天、最近错误
+python seat_io.py pending --seat 3            # 中文牌面摘要（桌况、手牌、牌河、听牌提示、选项）
+python seat_io.py events  --seat 3 --since 0  # 查看 round_start / round_end 等事件
+python seat_io.py wait    --seat 3 --timeout 600 --include-events --include-chat --json
+python seat_io.py answer  --seat 3 --pick 3 --say "打这张" --wait --json  # 答完即校验并纯 JSON 等下一手
+python seat_io.py answer  --seat 3 --kind discard --tile 3万        # 支持中文牌名与自动唯一 meta
+python seat_io.py answer  --seat 3 --kind chi --combo 4条+6条
+python seat_io.py reply   --seat 3 --text "这手真险"               # 回复暂停/局间聊天
 python seat_io.py trace   -n 20                # 复盘：谁打了什么、多久、读了多少 token
 python seat_io.py hear/tell --seat 3 ...       # 递话窗口
 ```
-
-**加杠、明杠、手里四张杠**：一定要用 `--pick N`，`--kind kan --tile p7` 会丢 `meta`，引擎判非法（老坑）。
 
 ## 四、`watch.py`：自动脑或门铃，不是默认监听
 
@@ -252,11 +266,11 @@ cd 'd:\Users\C\Documents\Empty\Mahjong'
 ### harness 侧最小循环（文件协议，和 TUI 完全一样）
 
 ```powershell
-# 1. 等 3 号的一手；timeout 0 = 一直等
-& 'D:\Program Files\Python313\python.exe' seat_io.py wait --seat 3 --timeout 0 --json
+# 1. 等 3 号的一手（可带事件和聊天）；timeout 0 = 一直等
+& 'D:\Program Files\Python313\python.exe' seat_io.py wait --seat 3 --timeout 0 --include-events --include-chat --json
 
-# 2. 从返回 JSON 的 legal 里选一个下标（1 基），原样带回 meta
-& 'D:\Program Files\Python313\python.exe' seat_io.py answer --seat 3 --pick 1 --say "这手这么打"
+# 2. 从返回 JSON 的 legal 里选一个下标（1 基）；加 --wait 可当场校验并等下一手
+& 'D:\Program Files\Python313\python.exe' seat_io.py answer --seat 3 --pick 1 --say "这手这么打" --wait
 ```
 
 `pending.json` 关键字段：
@@ -265,36 +279,49 @@ cd 'd:\Users\C\Documents\Empty\Mahjong'
 {
   "round": 12,
   "seat": 3,
+  "name": "桌宠小鲸（3号）",
   "kind": "discard",
+  "forced": false,
+  "table": { "run_id": "...", "round": 1, "lap": 1, "steps": 12, "dealer": 1, "board": {"1": 0, "2": 0, "3": 0, "4": 0}, "names": {"1": "1号（你）", "3": "桌宠小鲸（3号）"} },
   "view": { "hand": ["m1", "..."] },
+  "ting_hints": [ { "pick": 2, "tile": "m2", "tile_name": "2万", "waits": ["p3"], "wait_names": ["3饼"], "left_public": [3], "text": "..." } ],
+  "recent_events": [ { "seq": 5, "type": "draw", "text": "..." } ],
   "legal": [
-    { "kind": "discard", "tile": "m1", "meta": {} }
+    { "pick": 1, "label": "打 m1", "name": "1万", "kind": "discard", "tile": "m1", "meta": {} }
   ]
 }
 ```
 
-`answer.json` 格式：
+`answer.json` 格式（二选一）：
 
 ```json
-{
-  "round": 12,
-  "action": { "kind": "discard", "tile": "m1" },
-  "say": ""
-}
+{ "round": 12, "pick": 1, "say": "这手这么打" }
 ```
 
-- **加杠、明杠、后开花一定用 `--pick N`**；自己拼 `--kind` 会丢 `meta`，引擎判非法。
-- `round` 必须抄 pending 的；抄错等于没答，牌桌会停在原地等。
-- 只看 `pending.view`，不要读 `state.json` 的 `hands`；别人报听只有 `ting` 布尔，不显示等张。
-- 3 号是 external，没人接会**死等**；开桌后尽快把 harness 挂上，或者先挂 harness 再开桌。
+或显式 `action`（支持中文牌名，且会在唯一匹配时自动补 `meta`）：
+
+```json
+{ "round": 12, "action": { "kind": "discard", "tile": "1万" }, "say": "" }
+```
+
+- **加杠、明杠、后开花仍推荐 `--pick N`**；若手拼 `--kind` 省略 `meta` 且在 `legal` 里唯一，引擎会自动补齐；若填错则立刻写 `error.json` 拒绝。
+- `round` 必须抄 pending 的；抄错会立刻写入 `error.json` 并在 `answer --wait` / HTTP 接口报错返回。
+- 只看 `pending.view` / `/api/seat/<n>/*`，不要读 `state.json` 的 `hands`；别人报听只有 `ting` 布尔，不显示等张。
+- 3 号是 external，没人接会等至超时（`--agent-wait 0` 为死等）；开桌后尽快把 harness 挂上，或先通过 `seat_io.py wait` / `/api/seat/3/pending?wait=30` 等开局。
 - 当前 `state.json` 的 `meta.agent` 可能和 `you` 同号（老存档），此时内核会忽略同号 agent；所以接档时**必须**显式 `--players` 才能保证 3 号有 external 椅子。
 
-### 如果 harness 只能走 HTTP
+### 如果 harness 走 HTTP（已内置薄适配，不污染网页 JS）
 
-当前网页内核没有给 3 号单独开 `/api/seat/3/...` 的 pending 接口；3 号仍走 `seats/seat3/` 文件协议。需要 HTTP 的 harness 有两种办法：
+`webui.py` 已内置面向 external 座位的只看自己视角 HTTP 接口（非 external 座位访问一律 `403`，也不会写入 `webui.js`）：
 
-1. 在 harness 侧循环调用 `seat_io.py wait/answer`；
-2. 给 `webui.py` 加一层 `/api/seat/<n>/pending`、`/api/seat/<n>/answer` 的薄适配，**不要把这层写进网页 JS**。
+| 接口 | 作用 |
+| --- | --- |
+| `GET /api/seat/<n>/status` | 外部座位状态、`table.waiting`（当前在等谁与已耗时）、`pending`/`chat_pending` 摘要与最近错误 |
+| `GET /api/seat/<n>/pending` | 支持长轮询 `?wait=0..30&include_chat=1&include_events=1&since_event=0` |
+| `GET /api/seat/<n>/events` | 增量事件流 `?since=0&limit=0` |
+| `POST /api/seat/<n>/answer` | `{round?, pick? \| action?, say?}` 提交动作并校验 |
+| `POST /api/seat/<n>/give-up` | 当前这手交给随机托管 |
+| `POST /api/seat/<n>/chat-reply` | `{id?, text}` 回复暂停/局间聊天 |
 
 ### 网页按钮/接口速查
 
