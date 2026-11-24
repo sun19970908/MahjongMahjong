@@ -364,6 +364,7 @@ def main() -> int:
     ap.add_argument("--players", default="",
                     help='整桌人一次说清："1=human,2=llm,3=external,4=random"')
     ap.add_argument("--dealer", type=int, default=None)
+    ap.add_argument("--rule", default="tieling", help="规则集，默认 tieling")
     ap.add_argument("--base", type=int, default=1)
     ap.add_argument("--fan-cap", type=int, default=8)
     ap.add_argument("--agent-wait", type=float, default=0.0)
@@ -387,7 +388,9 @@ def main() -> int:
 
     cfg = CoreConfig(
         seat=args.seat, buddy=args.buddy, agent=args.agent, players=args.players,
-        dealer=args.dealer, base=args.base, fan_cap=args.fan_cap, seed=args.seed,
+        dealer=args.dealer, rule=args.rule,
+        rule_options={"base": args.base, "fan_cap": args.fan_cap},
+        seed=args.seed,
         rounds=args.rounds, steps=args.steps, demo=args.demo, offline=args.offline,
         no_chat=args.no_chat, no_save=args.no_save, no_prefetch=args.no_prefetch,
         trace=args.trace, cache=args.cache, agent_wait=args.agent_wait,

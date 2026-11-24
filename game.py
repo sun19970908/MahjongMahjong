@@ -36,10 +36,12 @@ from referee import (
     RULES_V1,
     counts_from,
     is_piao_hu,
+    melds_from_ids,
     parse_tile,
     tile_id,
     tile_name,
     tiles_from,
+    ting_hint_lines,
 )
 import seats as seats_mod
 import scoring
@@ -608,6 +610,12 @@ class Game:
             "seat": seat,
             "tile": tile_id(tile) if tile is not None else None,
             "zimo": zimo,
+            "how": (
+                "后开花" if bloom else
+                "自摸" if zimo else
+                f"抢杠，{seats_mod.label(from_seat)}号" if (rob and from_seat is not None) else
+                f"{seats_mod.label(from_seat)}号点炮" if from_seat is not None else ""
+            ),
             "from": from_seat,
             "rob": rob,
             "bloom": bloom,
@@ -721,6 +729,135 @@ class Game:
             drawn=self.drawn if (self.drawn is not None and seat == self.turn) else None,
         )
 
+    # ---------- 规则专属展示 / 提示（供 core.TableCore 透明委托） ----------
+
+    _PHASE_LABELS = {
+        "idle": "未开始",
+        "draw": "摸牌",
+        "discard": "出牌",
+        "react": "等反应",
+        "kan_draw": "杠后补张",
+        "ting_declare": "报听",
+        "ended": "收局",
+    }
+
+    def phase_label(self, phase: str) -> str:
+        return self._PHASE_LABELS.get(phase or "", phase or "?")
+
+    def action_label(self, action: dict) -> str:
+        """铁岭规则的动作短标签；core 不解释“报听/后开花”这些本地术语。"""
+        def tile_text(t) -> str:
+            try:
+                return tile_name(parse_tile(t))
+            except (TypeError, ValueError):
+                return str(t) if t is not None else "?"
+
+        kind = str(action.get("kind") or "")
+        tile = tile_text(action.get("tile"))
+        if kind == "discard":
+            return f"打 {tile}"
+        if kind == "pon":
+            return f"碰 {tile}"
+        if kind == "kan":
+            label = "加杠" if (action.get("meta") or {}).get("kind") == "added" else "杠"
+            return f"{label} {tile}"
+        if kind == "chi":
+            combo = action.get("combo") or []
+            return "吃 " + "+".join(tile_text(t) for t in combo)
+        return {
+            "win": "胡",
+            "bloom": "后开花",
+            "pass": "过",
+            "draw": "摸牌",
+            "ting": "报听",
+        }.get(kind, kind or "?")
+
+    def broadcast(self, rnd: int, res: dict | None, board: dict[int, int] | None,
+                  you: int | None = None, ended_early: bool = False) -> str:
+        """铁岭规则的局末播报文案；core 只负责把这段文字转给 UI/外部座位。"""
+        def tile_text(t) -> str:
+            try:
+                return tile_name(parse_tile(t))
+            except (TypeError, ValueError):
+                return str(t) if t is not None else "?"
+
+        head = f"【第{rnd}局播报】"
+        res = res or {}
+        if ended_early:
+            head += "提前结束，这一局没结算。"
+        elif not res:
+            head += "这一局没有结果。"
+        elif res.get("type") == "draw_game":
+            head += "荒庄，牌墙摸空。"
+        else:
+            seat = res.get("seat")
+            who = f"{seats_mod.label(seat)}号" if seat is not None else "?"
+            tile = tile_text(res.get("tile")) if res.get("tile") is not None else "?"
+            how = str(res.get("how") or "").strip()
+            if not how:
+                if res.get("zimo"):
+                    how = "自摸"
+                elif res.get("from") is not None:
+                    how = f"{seats_mod.label(res.get('from'))}号点炮"
+            head += f"{who} 胡 {tile}（{how}）。" if how else f"{who} 胡 {tile}。"
+            hand = res.get("hand") or []
+            if hand:
+                head += "赢家牌：" + " ".join(tile_text(t) for t in hand) + "。"
+            melds = res.get("melds") or []
+            if melds:
+                head += "副露：" + "；".join(
+                    " ".join(tile_text(t) for t in m.get("tiles") or ())
+                    for m in melds) + "。"
+        settle = res.get("settle") or {}
+        if settle.get("text"):
+            head += f"结算：{settle['text']}。"
+        if board:
+            head += "累计：" + "，".join(
+                f"{seats_mod.label(s)}号 {board[s]:+d}" for s in range(len(board)))
+            if you is not None:
+                head += f"；你 {board.get(you, 0):+d}。"
+        return head
+
+    def seat_public_state(self, seat: int, view: dict | None = None) -> dict:
+        return {
+            "ting": bool(self.ting.get(seat, False)),
+            "piao": bool(self.piao.get(seat, False)),
+            "ting_closed": bool(self.ting_closed.get(seat, False)),
+            "kans": int(self.kans.get(seat, 0)),
+            "dead": bool(self.dead_win.get(seat, False)),
+        }
+
+    def format_event(self, e: Event, viewer_seat: int | None = None) -> str | None:
+        t = e.type
+        label = seats_mod.label(e.seat) if e.seat is not None else "?"
+        name = tile_name(e.tile) if e.tile is not None else ""
+        is_me = viewer_seat is not None and e.seat == viewer_seat
+        if t == "kan_draw":
+            return f"你补张 {name}" if is_me else f"{label}号 补张"
+        if t == "kan":
+            klabel = {"in_hand": "明杠", "added": "加杠"}.get((e.data or {}).get("kind"), "杠")
+            return f"{label}号 {klabel} {name}"
+        if t == "ting":
+            return f"{label}号 报听"
+        if t == "bloom":
+            return f"{label}号 后开花 {name}"
+        if t == "dead":
+            return f"{label}号 放过胡，本局不准再胡"
+        if t == "draw_game":
+            return "荒庄：牌墙摸空"
+        if t == "win":
+            data = e.data or {}
+            tag = "抢杠" if data.get("rob") else (
+                "后开花" if data.get("bloom") else (
+                    "自摸" if data.get("zimo") else ""))
+            return f"*** {label}号 {tag}胡了！" if tag else f"*** {label}号 胡了！"
+
+    def ting_hints(self, seat: int, d: Decision | None = None,
+                   view: dict | None = None) -> list[dict]:
+        if d is None or d.seat != seat or d.kind != "discard":
+            return []
+        return compute_ting_hints(self.r, d.view if view is None else view, d.legal)
+
     # ---------- 杂务 ----------
     def _hand_sub(self, seat: int, tile: int, n: int) -> None:
         if self.hands[seat][tile] < n:
@@ -742,6 +879,67 @@ class Game:
         n += sum(len(d) for d in self.discards.values())
         n += len(self.wall)
         return n
+
+
+# ---------------------------------------------------------------- 规则听牌提示
+
+def compute_ting_hints(referee: Referee, view: dict, legal) -> list[dict]:
+    """铁岭规则专属：计算打哪张牌可合法单钓，以及按公开牌面还剩几张。"""
+    seat_idx = view.get("seat")
+    ting_map = view.get("ting") or {}
+    if ting_map.get(seat_idx) or ting_map.get(str(seat_idx)):
+        return []
+    discards = [a.tile for a in (legal or []) if a.kind == "discard" and a.tile is not None]
+    if not discards:
+        return []
+    hand = list(view.get("hand") or [])
+    try:
+        fixed = melds_from_ids(view.get("fixed") or [])
+        raw = referee.discard_ting_hints(hand, fixed, discards)
+    except Exception:
+        return []
+    if not raw:
+        return []
+    try:
+        hand_counts = list(counts_from(hand))
+        pub_counts = [0] * len(hand_counts)
+        for ms in (view.get("melds") or {}).values():
+            for meld in ms or ():
+                tiles = meld.get("tiles") if isinstance(meld, dict) else meld
+                for tid in tiles or ():
+                    pub_counts[parse_tile(tid)] += 1
+        for ds in (view.get("discards") or {}).values():
+            for tid in ds or ():
+                pub_counts[parse_tile(tid)] += 1
+    except Exception:
+        hand_counts = None
+        pub_counts = None
+
+    pick_by_tile = {
+        a.tile: idx for idx, a in enumerate(legal, 1)
+        if a.kind == "discard" and a.tile is not None
+    }
+    lines = ting_hint_lines(raw)
+    out = []
+    for h, line in zip(raw, lines):
+        dt = h["tile"]
+        waits = list(h.get("waits") or [])
+        left_list = []
+        if hand_counts is not None and pub_counts is not None:
+            for w in waits:
+                in_hand_after = max(0, hand_counts[w] - (1 if w == dt else 0))
+                left_list.append(max(0, COPIES - pub_counts[w] - in_hand_after))
+        suffix = f"（外剩{'/'.join(str(x) for x in left_list)}张）" if left_list else ""
+        out.append({
+            "pick": pick_by_tile.get(dt),
+            "tile": tile_id(dt),
+            "tile_name": tile_name(dt),
+            "waits": [tile_id(w) for w in waits],
+            "wait_names": [tile_name(w) for w in waits],
+            "left_public": left_list,
+            "text": line + suffix,
+        })
+    return out
 
 
 # ---------------------------------------------------------------- 简易选手

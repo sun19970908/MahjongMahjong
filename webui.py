@@ -163,12 +163,15 @@ class WebTable:
     def _config(self, overrides: dict | None = None, *, resume: bool = False) -> CoreConfig:
         overrides = overrides or {}
         players = str(overrides.get("players") or self.players or DEFAULT_PLAYERS)
+        rule_options = dict(overrides.get("rule_options") or {})
+        rule_options.setdefault("base", int(overrides.get("base") or 1))
+        rule_options.setdefault("fan_cap", int(overrides.get("fan_cap") or 8))
         return CoreConfig(
             seat=int(overrides.get("seat") or 1),
             players=players,
             dealer=(int(overrides["dealer"]) if overrides.get("dealer") not in (None, "", 0) else None),
-            base=int(overrides.get("base") or 1),
-            fan_cap=int(overrides.get("fan_cap") or 8),
+            rule=str(overrides.get("rule") or "tieling"),
+            rule_options=rule_options,
             seed=(int(overrides["seed"]) if overrides.get("seed") not in (None, "") else None),
             rounds=self.context_rounds,
             steps=max(0, int(overrides.get("steps") or 0)),

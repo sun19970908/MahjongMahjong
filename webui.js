@@ -813,10 +813,11 @@
 
   function openSettings() {
     if (state && state.config) {
+      const ruleOptions = state.config.rule_options || {};
       $("set-players").value = state.config.players || "1=human,2=llm,3=random,4=random";
       $("set-dealer").value = state.config.dealer || "";
-      $("set-base").value = state.config.base ?? 1;
-      $("set-fan-cap").value = state.config.fan_cap ?? 8;
+      $("set-base").value = ruleOptions.base ?? state.config.base ?? 1;
+      $("set-fan-cap").value = ruleOptions.fan_cap ?? state.config.fan_cap ?? 8;
       $("set-seed").value = state.config.seed ?? "";
       $("set-steps").value = state.config.steps ?? 0;
       $("set-agent-wait").value = state.config.agent_wait ?? 0;
