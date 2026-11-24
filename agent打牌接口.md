@@ -25,7 +25,7 @@
 
 - 每答完一手，**马上再 `wait`**（或直接用 `answer --wait`）；答完就停，就是没监听。
 - `wait` 返回 `timeout`，说明还没轮到这张座位（牌桌在等别人），继续等，不要乱答；`error.json` 有错会快速报错返回。
-- 仍推荐用 `--pick N`；若用 `--kind` 且在当前 `legal` 里唯一（或仅 `meta` 唯一），引擎会自动补齐 `meta`，支持 `7饼` 等中文牌名。
+- 仍推荐用 `--pick N`；若用 `--kind` 且在当前 `legal` 里唯一匹配，引擎会自动补齐 `meta`；有多个候选会被拒绝并提示改用 `--pick`。支持 `7饼` 等中文牌名。
 - 只看 `pending.view` / `pending.json`，不要读 `state.json` 里的 `hands`；那会看到别家手牌。
 - 要挂后台进程，只能挂“只读提醒”，真正落子仍由我按 pending 手动作答；不要让 `watch.py --brain mine` 的“保底”替打。
 
@@ -60,7 +60,7 @@ python play.py --trace
 | --- | --- |
 | `--players "1=human,2=llm,3=external,4=random"` | 一次说清整桌人，不用再一个个 `--seat/--buddy/--agent` |
 | `--dealer 2` | 指定 2 号坐庄；不给就开局掷两颗骰子定 |
-| `--rounds 3` | 连打 3 局：胡了连庄、没胡下家坐庄，局间结分 |
+| `--rounds 3` | LLM 上下文窗口：每 3 局清空一次，不是牌局总局数；整场只有你停/步数上限才收 |
 
 画面：开局显示「庄 N 号 骰 a+b=合计」，庄家有 ◆庄 标记；收局下方直接列番种、多少分、谁付。
 
@@ -218,7 +218,7 @@ python seat_io.py answer --seat 3 --kind discard --tile s8 --say "…"; python s
 
 要点：
 
-- 落子用 `--kind` 或 `--pick N`（加杠、明杠这种带 `meta` 的必须 `--pick`，`--kind` 会丢 `meta` 直接崩）。
+- 落子优先 `--pick N`（完整保留 `meta`）。手拼 `--kind` 时，若动作在当前 `legal` 里唯一匹配，引擎会自动补 `meta`；加杠/明杠/后开花有多个候选时会被拒绝，必须改用 `--pick`。
 - `wait` 超时返回 `timeout`，说明牌桌正等别人（比如 1 号你），继续等就是，别乱答。
 - 我落子之后 `pending.json` 会被 `ExternalPlayer` 删掉；如果另开了 `watch.py --brain mine`，它看到就记一行「你接了」，不会重复落子。
 - 我慢了，不会有脚本兜底；`watch.py --brain mine` 只是门铃，`--cap 0` 时它会一直等，牌桌也就停在这一手。要避免卡住，就答完一手立刻再 `wait`。
@@ -229,10 +229,10 @@ python seat_io.py answer --seat 3 --kind discard --tile s8 --say "…"; python s
 
 ## 九、已知的坑
 
-- `--kind` 不带 `meta` 会让加杠崩，用 `--pick`。
+- `--kind` 省略 `meta` 时，只有当前 `legal` 里唯一匹配才会自动补齐；有歧义会拒绝并提示 `--pick`，别硬猜。
 - `answer.json` 的 `round` 抄错，等于没答，牌桌会死在原地等。
 - **别把 `watch.py --brain fast/model` 当默认监听**：它会自己落子；`--brain mine --cap 0` 只是门铃，不写 answer。真正监听是第〇节的 `seat_io.py wait/answer` 循环。
-- 存档恢复后外部座位的 `round` 从 1 重计、`events/history` 没存，复盘时别拿 TUI 上的回合号对 `trace.jsonl`。
+- 存档恢复后 external 的 `round` 会按 `meta.ext_rounds` 接上，`events.jsonl` 也会续写；只有旧档没存 `ext_rounds` 时才从 1 重计。`trace.jsonl` 和旧事件不一定完整，复盘时别只拿 TUI 回合号硬对。
 - 两个进程同时写 `牌友笔记.md`（牌友 + 3 号）会互相覆盖，别指望它俩共享记忆。
 - 空想没结论时**别往历史里塞占位话**：「（闲下来想这手牌，还没想完）」这类句子会被模型当成自己上一句台词，下一手照着念，牌桌上整排复读。
 

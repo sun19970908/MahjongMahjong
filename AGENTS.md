@@ -18,9 +18,10 @@
 * `watch.py --brain mine --cap 0` 只是门铃：它只会在日志里喊“你上”，**不会替你写 `answer.json`**；没人答，牌桌就死等。
 * 正确做法是在对话回合里用 `seat_io.py wait` + `seat_io.py answer` 循环：
   1. `python seat_io.py wait --seat <n> --timeout 0 --json` 阻塞等 pending；
-  2. 从 `legal` 里选动作，优先 `--pick N`（保留 `meta`），写回 `answer`；
-  3. 答完一手**立刻再 wait**，直到局终。
-* 加杠/明杠/后开花必须用 `--pick N`；`--kind` 会丢 `meta`。
+  2. 从 `legal` 里选动作，优先 `--pick N`（完整保留 `meta`），写回 `answer`；
+  3. 答完一手**立刻再 wait**（或直接用 `answer --wait`），直到局终。
+* 加杠/明杠/后开花优先用 `--pick N`。手拼 `--kind` 时，只有当前 `legal` 里唯一匹配才会自动补 `meta`；有多个候选会被拒绝并提示改用 `--pick`，别硬猜。
 * 只读 `pending.view`，不要读 `state.json` 的 `hands`；`wait` 返回 `timeout` 是还没轮到，不要乱答。
-* 详细命令和例子见 `agent打牌接口.md` 第〇节、第四节和第八节。
+* 网页牌桌给 harness 留 external 椅子时，接档也要显式 `--players`，否则老存档的座位表可能没有 external 位。
+* 详细命令和例子见 `agent打牌接口.md` 第〇、四、八、十节。
 
